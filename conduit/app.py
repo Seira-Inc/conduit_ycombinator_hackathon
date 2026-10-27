@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 import time
 import zipfile
@@ -24,7 +25,7 @@ from .gateway import build_gateway, mount_gateway
 from .generator import Store
 from .keep import daily_check, seconds_until
 from .links import Links, page
-from .login import confirm, fingerprint, watch_for_sign_in
+from .login import confirm, fingerprint, login_finding, watch_for_sign_in
 from .messages import site_label
 from .models import BuildRequest, StrictModel
 from .programs import ProgramError
@@ -36,6 +37,7 @@ from .users import Users
 
 STATIC = Path(__file__).with_name("static")
 SIGN_IN_WAIT = 600
+SIGN_IN_RETRY = 5
 
 
 class CallRequest(StrictModel):
@@ -91,9 +93,12 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
             # The MCP endpoint and the sign-in and approval pages have no dashboard script behind
             # them: the SDK's checks guard /mcp, and an unguessable one-use token guards the pages.
             # A foreign Origin is still refused here.
-            local = (request.headers.get("x-conduit-local") == "1" or request.url.path == "/mcp"
-                     or request.url.path.startswith(("/signin/", "/approve/")))
+            link_page = request.url.path.startswith(("/signin/", "/approve/"))
+            local = request.headers.get("x-conduit-local") == "1" or request.url.path == "/mcp" or link_page
             if (origin_header and origin_header != expected) or not local:
+                if link_page:
+                    return HTMLResponse(page("This link didn't work", [
+                        "Open it again from Claude's message, or ask Claude for a new one."]), status_code=403)
                 return JSONResponse(
                     {"detail": "This action must originate from the local Conduit dashboard."},
                     status_code=403,
@@ -102,7 +107,10 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
                 return JSONResponse({"detail": "Request is too large"}, status_code=413)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        # Under no-referrer a browser sends "Origin: null" with a form's POST, which the check above
+        # refuses; the link pages' buttons are forms, so they send their origin to Seira itself.
+        response.headers["Referrer-Policy"] = (
+            "same-origin" if request.url.path.startswith(("/signin/", "/approve/")) else "no-referrer")
         response.headers["Cache-Control"] = "no-store"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
@@ -200,12 +208,30 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
                                                       resource=job.get("resource"))["job_id"]
                 return
 
+    def sign_in_record(connector_id, step, **detail):
+        """The local sign-in record (signin.jsonl): steps, pages by site and path, results. Never values."""
+        row = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "connector_id": connector_id, "step": step, **detail}
+        with suppress(OSError, TypeError, ValueError):
+            with (store.home / "signin.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, default=str) + "\n")
+
+    def page_of(facts):
+        url = (facts or {}).get("url") or ""
+        return {"page": url.split("?")[0].split("#")[0][:200], "title": ((facts or {}).get("title") or "")[:120]}
+
+    async def trial_sign_in(manifest, before) -> dict:
+        trial = BrowserSession(manifest, store.home)
+        try:
+            return await confirm(trial, before, seen=True)
+        finally:
+            await trial.close()
+
     async def run_sign_in(connector_id, link):
         """Open a sign-in window on this computer, wait for the person to sign in, save the session
         and check it. Calls on this connector answer busy meanwhile instead of waiting."""
         runtime = runtime_for(connector_id)
         signing_in.add(connector_id)
-        check = {"verified": False}
+        check, window_gone = {"verified": False}, False
         try:
             async with runtime.lock:
                 await runtime.close()
@@ -214,19 +240,63 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
                 runtime.browser.manual_login = True
                 await runtime.browser.start()
                 before = await fingerprint(runtime.browser.page)
-                link["progress"] = "waiting"
-                await watch_for_sign_in(runtime.browser, before, SIGN_IN_WAIT)
-                await runtime.browser.finish_login()
+                sign_in_record(connector_id, "window opened", **page_of(before))
+                link["progress"], link["done"] = "waiting", asyncio.Event()
+                deadline, seen, window_gone = time.monotonic() + SIGN_IN_WAIT, False, False
+                while time.monotonic() < deadline:
+                    # The person says when they are done ("I've signed in"); a page that plainly looks
+                    # signed in starts the same test sooner. Either way the window closes only once
+                    # the cookies it holds now open the site signed in, in a separate browser.
+                    watcher = asyncio.create_task(
+                        watch_for_sign_in(runtime.browser, before, deadline - time.monotonic()))
+                    clicked = asyncio.create_task(link["done"].wait())
+                    done, pending = await asyncio.wait({watcher, clicked}, timeout=deadline - time.monotonic(),
+                                                       return_when=asyncio.FIRST_COMPLETED)
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    by_person = clicked in done
+                    note = getattr(runtime.browser, "watch_note", {}) or {}
+                    sign_in_record(connector_id, "button pressed" if by_person else "window watched", **note)
+                    if not by_person and not (watcher in done and watcher.result()):
+                        window_gone = note.get("ended") == "window closed"
+                        break
+                    link["progress"] = "testing"
+                    trial = {"verified": False}
+                    try:
+                        if await runtime.browser.checkpoint():
+                            trial = await trial_sign_in(runtime.manifest, before)
+                        else:
+                            trial["reason"] = "the window's page looks signed out, so nothing was saved"
+                    except Exception as exc:
+                        trial["reason"] = type(exc).__name__
+                    sign_in_record(connector_id, "saved cookies tried", verified=trial["verified"],
+                                   reason=trial.get("reason"), **page_of(trial.get("after")))
+                    if trial["verified"]:
+                        seen = True
+                        break
+                    link["done"].clear()
+                    link["progress"] = "not_yet"
+                    await asyncio.sleep(SIGN_IN_RETRY)
+                link["progress"] = "checking"
+                finished = await runtime.browser.finish_login()
                 await runtime.browser.close()
+                sign_in_record(connector_id, "window closed by Seira", saved=finished)
                 runtime.browser = BrowserSession(runtime.manifest, store.home)
-                check = await confirm(runtime.browser, before)
-                runtime.manifest.findings.append({"type": "login_check", **check})
+                check = await confirm(runtime.browser, before, seen=seen)
+                sign_in_record(connector_id, "final check", verified=check["verified"], reason=check.get("reason"),
+                               **page_of(check.get("after")))
+                runtime.manifest.findings.append(login_finding(check))
                 store.write(runtime.manifest)
                 runtime.manifest_mtime = manifest_mtime(connector_id)
                 await runtime.close()
-            link["progress"] = "signed_in" if check["verified"] else "not_verified"
+                if check["verified"]:
+                    runtime.remember_sign_in("signed_in", check["reason"])
+            link["progress"] = ("signed_in" if check["verified"] else "window_closed" if window_gone
+                                else "not_verified")
         except Exception as exc:
             link["progress"], link["error"] = "failed", type(exc).__name__
+            sign_in_record(connector_id, "failed", error=type(exc).__name__)
             with suppress(Exception):
                 await runtime.close(save=False)
         finally:
@@ -272,6 +342,16 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
             task.add_done_callback(tasks.discard)
         return RedirectResponse(f"/signin/{token}/status", status_code=303)
 
+    @app.post("/signin/{token}/done")
+    async def sign_in_done(token: str):
+        link = links.get(token, "sign_in")
+        if link is None:
+            return expired_page()
+        if link.get("done") is not None and link.get("progress") in ("waiting", "not_yet"):
+            link["done"].set()
+            link["progress"] = "testing"
+        return RedirectResponse(f"/signin/{token}/status", status_code=303)
+
     @app.get("/signin/{token}/status")
     async def sign_in_status(token: str):
         link = links.get(token, "sign_in")
@@ -279,16 +359,29 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
             return expired_page()
         site = link_site(link)
         progress = link.get("progress", "opening")
-        title, text, refresh = {
-            "opening": ("Opening the sign-in window", "One moment.", 2),
-            "waiting": (f"Sign in to {site}", f"A browser window is open on this computer. Sign in to {site} "
-                        "there. This page updates by itself.", 3),
-            "signed_in": ("You're signed in", "Go back to Claude and ask again.", None),
-            "not_verified": ("Seira couldn't confirm the sign-in", "Ask Claude again for a new link and sign in "
-                             "once more.", None),
-            "failed": ("The sign-in didn't finish", "Ask Claude again for a new link.", None),
-        }.get(progress, ("Signing in", "One moment.", 2))
-        return HTMLResponse(page(title, [text], refresh=refresh))
+        done = [(f"/signin/{token}/done", "I've signed in")]
+        title, text, refresh, form = {
+            "opening": ("Opening the sign-in window", ["One moment."], 2, None),
+            "waiting": (f"Sign in to {site}", [
+                f"A browser window is open on this computer. Sign in to {site} there; if the site opens a "
+                "second window for the sign-in, finish it there.",
+                f"When you can see your {site} account, press the button. Leave the window open; Seira closes "
+                "it."], 5, done),
+            "not_yet": ("Not signed in yet", [
+                f"Seira opened {site} with what the window has saved so far, and it wasn't signed in. Finish "
+                "signing in in the window, then press the button again."], 5, done),
+            "testing": ("Checking your sign-in", [
+                "Leave the sign-in window open. Seira is checking that the sign-in worked and closes the "
+                "window once it has."], 2, None),
+            "checking": ("Checking the sign-in", [f"Seira is checking that {site} opens signed in."], 2, None),
+            "signed_in": ("You're signed in", ["Go back to Claude and ask again."], None, None),
+            "window_closed": ("The sign-in window closed", [
+                "It closed before Seira could check the sign-in. Ask Claude again for a new link."], None, None),
+            "not_verified": ("Seira couldn't confirm the sign-in", [
+                "Ask Claude again for a new link and sign in once more."], None, None),
+            "failed": ("The sign-in didn't finish", ["Ask Claude again for a new link."], None, None),
+        }.get(progress, ("Signing in", ["One moment."], 2, None))
+        return HTMLResponse(page(title, text, form=form, refresh=refresh))
 
     @app.get("/approve/{token}")
     async def approval_page(token: str):
@@ -543,8 +636,8 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
                     await runtime.browser.close()
                     runtime.browser = BrowserSession(runtime.manifest, store.home)
                     await refresh_forms(runtime.manifest, runtime.browser)
-                    check = await confirm(runtime.browser, getattr(runtime, "login_fingerprint", None))
-                    runtime.manifest.findings.append({"type": "login_check", **check})
+                    check = await confirm(runtime.browser, getattr(runtime, "login_fingerprint", None), seen=True)
+                    runtime.manifest.findings.append(login_finding(check))
                     store.write(runtime.manifest)
                     if not check["verified"]:
                         return {

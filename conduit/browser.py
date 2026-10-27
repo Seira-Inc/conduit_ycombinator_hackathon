@@ -11,7 +11,7 @@ from urllib.parse import urljoin
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
-from .login import fingerprint, looks_signed_out
+from .login import fingerprint, looks_signed_out, needs_sign_in, page_matches, sign_in_pages
 from .models import Manifest, Tool, origin, schema
 from .net import NetworkPolicy
 from .recorder import Recorder
@@ -24,6 +24,10 @@ POINT = {
     "required": ["x", "y"],
     "additionalProperties": False,
 }
+SETTLE = 15.0
+SETTLE_NO_SIGN_IN = 3.0
+DOUBT_HOLDS = 3.0
+POLL = 0.5
 MODIFIERS = {
     "type": "array",
     "items": {"enum": ["Control", "Alt", "Shift", "Meta"]},
@@ -171,11 +175,15 @@ class BrowserSession:
         self.clear_sign_in_signals()
         self.playwright = await async_playwright().start()
         preferred = os.environ.get("CONDUIT_BROWSER_CHANNEL")
-        channels = (
-            [preferred]
-            if preferred
-            else (["msedge", "chrome", None] if os.name == "nt" else [None, "chrome"])
-        )
+        if preferred:
+            channels = [preferred]
+        elif self.headed and self.manual_login:
+            # A signed-in Edge profile takes over a Microsoft sign-in and closes the window it came
+            # from, so a person signs in through Chrome or Playwright's own Chromium; the session they
+            # save works in headless Edge.
+            channels = ["chrome", None, "msedge"]
+        else:
+            channels = ["msedge", "chrome", None] if os.name == "nt" else [None, "chrome"]
         errors = []
         for channel in channels:
             try:
@@ -313,6 +321,45 @@ class BrowserSession:
         if facts.get("identity_inputs") and facts.get("sign_in_controls"):
             return "weak", "a sign-in form is visible"
         return None, None
+
+    async def check_sign_in(self, *, expect_sign_in=False) -> tuple[str, str]:
+        """Open the start page and judge the stored session: "signed_in", "signed_out" or "unsure".
+        Single-page apps paint a neutral loading page first, so this watches the page settle. A site
+        that never asked for a sign-in counts as signed in unless it plainly sends the browser away;
+        `expect_sign_in` judges it as one that has, as right after a sign-in."""
+        needs = expect_sign_in or needs_sign_in(self.manifest)
+        pages = sign_in_pages(self.manifest) if needs else {}
+        if self.context is None:
+            await self.start()
+        else:
+            self.clear_sign_in_signals()
+            with suppress(PlaywrightError):
+                await self.page.goto(self.manifest.target, wait_until="domcontentloaded", timeout=25000)
+        deadline = time.monotonic() + (SETTLE if needs else SETTLE_NO_SIGN_IN)
+        doubt, doubt_since = None, None
+        while True:
+            signal, reason = await self.sign_in_state()
+            if signal in ("strong", "signed_in"):
+                return ("signed_out" if signal == "strong" else "signed_in"), reason
+            facts = await fingerprint(self.page)
+            if page_matches(facts, pages.get("in")):
+                return "signed_in", "the site shows the page it shows when you're signed in"
+            if needs:
+                # A visible "Sign in" can flash past while an app loads; it counts once it stays.
+                doubt = ("the site shows the page it shows when you're signed out"
+                         if page_matches(facts, pages.get("out"))
+                         else looks_signed_out(facts) or ("a sign-in form is visible" if signal == "weak" else None))
+                doubt_since = None if doubt is None else doubt_since or time.monotonic()
+                if doubt_since is not None and time.monotonic() - doubt_since >= DOUBT_HOLDS:
+                    return "signed_out", doubt
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(POLL)
+        if not needs:
+            return "signed_in", "the site has never asked for a sign-in"
+        if doubt:
+            return "signed_out", doubt
+        return "unsure", "nothing on the page shows whether you're signed in"
 
     @staticmethod
     def _main_frame_request(request):
@@ -562,14 +609,21 @@ class BrowserSession:
                 state["origins"].append({"origin": origin(page.url), "localStorage": items})
         return state
 
+    async def checkpoint(self) -> bool:
+        """Write the sign-in window's cookies and this page's storage now, without the navigation a
+        full save makes; refused while the page shows it is signed out."""
+        if self.session_file.exists() and await self._signed_out_reason():
+            return False
+        save_session(self.session_file, await asyncio.wait_for(self._checkpoint_state(), 5))
+        self.session_loaded_mtime = self._session_mtime()
+        self._login_checkpoint_saved = True
+        return True
+
     async def _checkpoint_login(self):
         """Protect this isolated login's state before a window or browser can disappear."""
         while self.browser and self.browser.is_connected():
             try:
-                if not (self.session_file.exists() and await self._signed_out_reason()):
-                    save_session(self.session_file, await asyncio.wait_for(self._checkpoint_state(), 5))
-                    self.session_loaded_mtime = self._session_mtime()
-                    self._login_checkpoint_saved = True
+                await self.checkpoint()
             except Exception:
                 if not self.browser or not self.browser.is_connected():
                     return

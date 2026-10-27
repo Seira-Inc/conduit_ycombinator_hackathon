@@ -2,6 +2,7 @@ import asyncio
 import re
 from datetime import datetime
 
+import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 from test_compiler import family_for
 from test_gateway import READ
@@ -91,6 +92,7 @@ async def test_without_a_model_the_withdrawn_tool_names_the_manual_repair(app, m
     assert "conduit" not in failed and not app.state.jobs
 
 
+@pytest.mark.sign_in_check
 async def test_daily_check_records_whether_each_site_is_still_signed_in(app, monkeypatch):
     class Browser:
         def __init__(self, manifest, home, *, headed=False):
@@ -99,14 +101,15 @@ async def test_daily_check_records_whether_each_site_is_still_signed_in(app, mon
         def session_changed_on_disk(self):
             return False
 
-        async def start(self):
+        def _session_mtime(self):
+            return None
+
+        async def check_sign_in(self):
             self.context = object()
+            return "signed_out", "a password field is visible"
 
         async def save(self):
             return True
-
-        async def sign_in_state(self):
-            return "strong", "a password field is visible"
 
         async def close(self):
             self.context = None

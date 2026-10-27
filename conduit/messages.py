@@ -30,6 +30,8 @@ CODE_KIND = {
 TEMPLATES = {
     "sign_in_required": "You're signed out of {site}. Sign in here, then ask again: {link}",
     "sign_in_maybe": "{Site} refused this. You may need to sign in again: {link}",
+    "sign_in_unsure": "Seira can't tell whether you're still signed in to {site}. Sign in here to make sure, "
+                      "then ask again: {link}",
     "no_access": "You don't have access to that on {site}. Ask its owner for access.",
     "not_found": "There's no {thing} with that ID on {site}.",
     "ambiguous": "More than one {thing} on {site} matches. Give its ID.",

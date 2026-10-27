@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -12,6 +13,8 @@ from .browser import BrowserSession
 from .models import Manifest
 from .net import NetworkPolicy, auth_values, fetch
 from .session_lock import SessionLease
+
+SIGN_IN_FRESH = 1800
 
 
 class InvalidArguments(ValueError):
@@ -40,6 +43,37 @@ class Runtime:
         self.session_lock = None
         self.progress = None
         self._lease_task = None
+        self.sign_in = None
+
+    def remember_sign_in(self, state: str, reason: str | None):
+        mtime = self.browser._session_mtime() if self.browser else None
+        self.sign_in = {"state": state, "reason": reason, "at": time.monotonic(), "session": mtime}
+
+    def known_sign_in(self, max_age: float = SIGN_IN_FRESH) -> str | None:
+        """The last judgement, unless it is old or the stored session changed since."""
+        known = self.sign_in
+        if known is None or time.monotonic() - known["at"] >= max_age:
+            return None
+        if self.browser and self.browser._session_mtime() != known["session"]:
+            return None
+        return known["state"]
+
+    async def check_sign_in(self, *, max_age: float = SIGN_IN_FRESH) -> tuple[str, str | None]:
+        """Whether the stored session is signed in; the browser looks again once the answer is older
+        than max_age, so the first use after a start always looks."""
+        if self.browser is None:
+            return "signed_in", None
+        if self.known_sign_in(max_age) is not None:
+            return self.sign_in["state"], self.sign_in["reason"]
+        async with self.lock:
+            await self.acquire_browser()
+            try:
+                state, reason = await self.browser.check_sign_in()
+            finally:
+                if self.session_lock is not None and self.session_lock.held:
+                    self.session_lock.renew()
+        self.remember_sign_in(state, reason)
+        return state, reason
 
     async def acquire_browser(self):
         """Hold the connector's browser lease. A lease another holder took while this one was idle
@@ -104,7 +138,7 @@ class Runtime:
             await self.acquire_browser()
             self.browser.clear_sign_in_signals()
             try:
-                return await FamilyExecutor(self.browser, self.manifest, tool.config["family"]).call(
+                result = await FamilyExecutor(self.browser, self.manifest, tool.config["family"]).call(
                     tool.operation, arguments)
             except ProgramError as exc:
                 for resource in self.manifest.capabilities:
@@ -115,7 +149,11 @@ class Runtime:
                     exc.sign_in, exc.sign_in_reason = await self.browser.sign_in_state()
                 except Exception:
                     exc.sign_in, exc.sign_in_reason = None, None
+                if exc.sign_in == "strong":
+                    self.remember_sign_in("signed_out", exc.sign_in_reason)
                 raise
+            self.remember_sign_in("signed_in", "a call just worked")
+            return result
         if tool.adapter == "agent":
             from .agent import run_task
 

@@ -1,11 +1,18 @@
 """Generic sign-in checks. The website's own page decides; no site-specific selectors live here."""
 from __future__ import annotations
 
+import time
 from contextlib import suppress
+from datetime import datetime
+from urllib.parse import urlsplit
 
 from playwright.async_api import Error as PlaywrightError
 
-FACTS = """() => {
+from .models import origin
+
+TRUST_SIGN_IN = 1800
+STEADY = 5.0
+FACTS ="""() => {
   const visible = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
   const label = e => (e.innerText || e.value || e.getAttribute('aria-label') || '').trim();
   const controls = [...document.querySelectorAll('a,button,[role=button],[role=link],input[type=submit]')]
@@ -65,6 +72,63 @@ def _facts(fingerprint_dict):
     return {k: v for k, v in (fingerprint_dict or {}).items() if k != "text"}
 
 
+def login_finding(check: dict) -> dict:
+    return {"type": "login_check", "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **check}
+
+
+def needs_sign_in(manifest) -> bool:
+    """Seira has seen this site ask for a sign-in. Any other site counts as signed in by default."""
+    return bool(manifest.login_origins) or any(f.get("type") == "login_check" for f in manifest.findings)
+
+
+def recently_signed_in(manifest, seconds=TRUST_SIGN_IN) -> bool:
+    for finding in reversed(manifest.findings):
+        if finding.get("type") == "login_check" and finding.get("verified") is True:
+            try:
+                at = datetime.strptime(finding.get("at", ""), "%Y-%m-%dT%H:%M:%S%z").timestamp()
+            except ValueError:
+                return False
+            return time.time() - at < seconds
+    return False
+
+
+def _page_key(facts):
+    url = (facts or {}).get("url") or ""
+    if not url.startswith(("http://", "https://")):
+        return None
+    return origin(url), urlsplit(url).path.rstrip("/") or "/", ((facts or {}).get("title") or "").strip()
+
+
+def page_matches(facts, key) -> bool:
+    return key is not None and _page_key(facts) == key
+
+
+def sign_in_pages(manifest) -> dict:
+    """The start page as a verified sign-in saw it, "out" before and "in" after, from the newest one
+    whose pages differ. "out" must be another address, since a title alone may just be loading."""
+    for check in reversed(manifest.findings):
+        if check.get("type") != "login_check" or check.get("verified") is not True:
+            continue
+        signed_in, signed_out = _page_key(check.get("after")), _page_key(check.get("before"))
+        if signed_in is None or signed_in == signed_out:
+            continue
+        pages = {"in": signed_in}
+        if signed_out is not None and signed_out[:2] != signed_in[:2]:
+            pages["out"] = signed_out
+        return pages
+    return {}
+
+
+def on_site(manifest, facts) -> bool | None:
+    """True on one of the site's own pages, False on another site, None for a blank or error page."""
+    key = _page_key(facts)
+    return None if key is None else key[0] in manifest.allowed_origins
+
+
+def no_sign_in_prompt(facts) -> bool:
+    return not facts.get("password_inputs") and not facts.get("identity_inputs") and looks_signed_out(facts) is None
+
+
 async def _first_visible(page, selector):
     candidates = page.locator(selector)
     for index in range(min(await candidates.count(), 12)):
@@ -120,13 +184,27 @@ async def scripted_login(session, *, user="", password="", login_url=None, user_
 
 
 async def watch_for_sign_in(session, before, seconds, *, text=None, selector=None) -> bool:
-    """Poll the headed login browser until a page looks signed in, the browser closes, or time runs out."""
+    """Poll the headed login browser until a page looks signed in, the browser closes, or time runs out.
+    Without a sign-out control, a page counts after a sign-in page or another site once it has stayed
+    STEADY seconds with no prompt and is neither the opening page nor the known signed-out page."""
     import asyncio
-    import time
 
     deadline = time.monotonic() + seconds
+    markers = sign_in_pages(session.manifest)
+    not_signed_in = {key for key in (markers.get("out"), _page_key(before)) if key is not None}
+    went_through_sign_in = bool((before or {}).get("password_inputs"))
+    steady = {}
+    # Where the window went, for the local sign-in record: each page's site, path and title as it
+    # changes, with how many tabs were open. Never a query string, a field value or a cookie.
+    path, session.watch_note = [], {}
+
+    def note(ended, **detail):
+        session.watch_note = {"ended": ended, "went_through_sign_in": went_through_sign_in, "path": path[-30:],
+                              **detail}
+
     while time.monotonic() < deadline:
         if not (session.browser and session.browser.is_connected()):
+            note("window closed")
             return False
         pages = [p for p in session.context.pages if not p.is_closed()] if session.context else []
         for page in pages:
@@ -135,17 +213,37 @@ async def watch_for_sign_in(session, before, seconds, *, text=None, selector=Non
                 with suppress(PlaywrightError):
                     selector_found = await page.locator(selector).count() > 0
             after = await fingerprint(page)
-            verified, _ = looks_signed_in(before, after, text=text, selector_found=selector_found)
+            key = _page_key(after)
+            if not path or path[-1][:3] != (list(key) if key else [None, None, None]):
+                path.append([*(key or (None, None, None)), len(pages)])
+            if after.get("password_inputs") or on_site(session.manifest, after) is False:
+                went_through_sign_in = True
+            verified, rule = looks_signed_in(before, after, text=text, selector_found=selector_found)
+            if not verified and text is None and selector is None:
+                if page_matches(after, markers.get("in")):
+                    verified, rule = True, "the known signed-in page"
+                elif (went_through_sign_in and on_site(session.manifest, after) and no_sign_in_prompt(after)
+                      and key not in not_signed_in):
+                    if steady.get(id(page), (None,))[0] != key:
+                        steady[id(page)] = (key, time.monotonic())
+                    verified = time.monotonic() - steady[id(page)][1] >= STEADY
+                    rule = "a page that stayed with no sign-in prompt"
+                else:
+                    steady.pop(id(page), None)
             if verified:
+                note(rule)
                 session.page = page
                 await asyncio.sleep(3)
                 return True
         await asyncio.sleep(2)
+    note("timed out")
     return False
 
 
-async def confirm(session, before, *, text=None, selector=None) -> dict:
-    """Reopen the target through the saved session and report whether it looks signed in."""
+async def confirm(session, before, *, text=None, selector=None, seen=False) -> dict:
+    """Reopen the target through the saved session and report whether it looks signed in. Without a
+    marker the site's settled start page decides; `seen` (the person signed in moments ago) lets a page
+    that shows nothing either way count, unless it is the page the sign-in began on."""
     await session.start()
     page = session.page
     with suppress(PlaywrightError):
@@ -160,4 +258,9 @@ async def confirm(session, before, *, text=None, selector=None) -> dict:
             await page.get_by_text(text).first.wait_for(timeout=15000)
     after = await fingerprint(page)
     verified, reason = looks_signed_in(before, after, text=text, selector_found=selector_found)
+    if not verified and text is None and selector is None:
+        state, why = await session.check_sign_in(expect_sign_in=True)
+        after = await fingerprint(session.page)
+        if state == "signed_in" or (state == "unsure" and seen and _page_key(after) != _page_key(before)):
+            verified, reason = True, why
     return {"verified": verified, "reason": reason, "before": _facts(before), "after": _facts(after)}

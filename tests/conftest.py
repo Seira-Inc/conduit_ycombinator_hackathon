@@ -11,6 +11,19 @@ import pytest
 STATIC = Path(__file__).parents[1] / "conduit" / "static"
 
 
+@pytest.fixture(autouse=True)
+def signed_in_unless_checked(request, monkeypatch):
+    """Fast tests never open a browser to check a sign-in; integration tests and tests marked
+    sign_in_check run the real check."""
+    if request.node.get_closest_marker("integration") or request.node.get_closest_marker("sign_in_check"):
+        return
+
+    async def signed_in(self, **kwargs):
+        return "signed_in", None
+
+    monkeypatch.setattr("conduit.runtime.Runtime.check_sign_in", signed_in)
+
+
 @pytest.fixture
 def app(tmp_path):
     """A dashboard app over a temporary home holding one verified connector, demo-1 on example.com."""
@@ -118,6 +131,16 @@ def local_site():
                     b"""<!doctype html><title>Sign in</title><label>Name<input name="name" aria-label="Name"></label><button onclick="document.cookie='test_session=present;path=/';document.body.innerHTML='<h1>Signed in</h1>'">Sign in</button>""",
                     content_type="text/html",
                 )
+            if path == "/landing":
+                # Like Microsoft Forms: a neutral loading page that later becomes the app or a sign-in button.
+                return self.send(
+                    b"""<!doctype html><title>Landing</title><body>Loading<script>setTimeout(() => {"""
+                    b"""if (document.cookie.includes('test_session=present')) location.href = '/app';"""
+                    b"""else document.body.innerHTML = '<button>Sign in</button>';}, 800);</script>""",
+                    content_type="text/html",
+                )
+            if path == "/app":
+                return self.send(b"<!doctype html><title>App</title><h1>Your forms</h1>", content_type="text/html")
             if path == "/session":
                 signed_in = "test_session=present" in self.headers.get("Cookie", "")
                 return self.send(

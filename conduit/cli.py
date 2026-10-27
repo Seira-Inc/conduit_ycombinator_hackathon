@@ -233,7 +233,7 @@ def main():
             async def sign_in():
                 from .browser import BrowserSession
                 from .discovery import refresh_forms
-                from .login import confirm, fingerprint, watch_for_sign_in
+                from .login import confirm, fingerprint, login_finding, watch_for_sign_in
                 from .session_lock import SessionLease
 
                 store = Store(args.home)
@@ -247,6 +247,7 @@ def main():
                 try:
                     await session.start()
                     before = await fingerprint(session.page)
+                    seen = True
                     if args.wait:
                         print(f"Sign in in the browser window. Watching for up to {args.wait} s.", flush=True)
                         seen = await watch_for_sign_in(session, before, args.wait, text=args.logged_in_text,
@@ -269,8 +270,9 @@ def main():
                 session = BrowserSession(manifest, store.home)
                 try:
                     await refresh_forms(manifest, session)
-                    check = await confirm(session, before, text=args.logged_in_text, selector=args.logged_in_selector)
-                    manifest.findings.append({"type": "login_check", **check})
+                    check = await confirm(session, before, text=args.logged_in_text, selector=args.logged_in_selector,
+                                          seen=seen)
+                    manifest.findings.append(login_finding(check))
                     store.write(manifest)
                 finally:
                     try:

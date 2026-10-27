@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from contextlib import suppress
 from datetime import datetime, timedelta
 
 from .operation_import import verified_program
@@ -57,18 +56,14 @@ async def daily_check(manifests, runtime_for, *, has_session, busy, write, audit
         if busy(manifest.id) or runtime.lock.locked():
             rows.append({**row, "status": "busy"})
             continue
-        async with runtime.lock:
-            try:
-                await runtime.acquire_browser()
-                await runtime.browser.start()
-                with suppress(Exception):
-                    await runtime.browser.page.wait_for_load_state("networkidle", timeout=10000)
-                signal, reason = await runtime.browser.sign_in_state()
-                status = {"strong": "signed_out", "weak": "maybe_signed_out"}.get(signal, "signed_in")
-                row.update(status=status, reason=reason if status != "signed_in" else None)
-            except Exception as exc:
-                row.update(status="error", reason=f"{type(exc).__name__}: {str(exc)[:200]}")
-            finally:
+        try:
+            state, reason = await runtime.check_sign_in(max_age=0)
+            status = {"unsure": "maybe_signed_out"}.get(state, state)
+            row.update(status=status, reason=reason if status != "signed_in" else None)
+        except Exception as exc:
+            row.update(status="error", reason=f"{type(exc).__name__}: {str(exc)[:200]}")
+        finally:
+            async with runtime.lock:
                 await runtime.close()
         finding = {"type": "daily_check", "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                    "status": row["status"], "reason": row.get("reason")}

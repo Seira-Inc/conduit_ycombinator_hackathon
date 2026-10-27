@@ -29,7 +29,7 @@ packages = ["conduit"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
-markers = ["integration: launches a real browser or MCP subprocess", "desktop: requires an interactive Windows desktop", "live_model: uses the configured live model and account usage"]
+markers = ["integration: launches a real browser or MCP subprocess", "desktop: requires an interactive Windows desktop", "live_model: uses the configured live model and account usage", "sign_in_check: runs Seira's real sign-in check instead of the signed-in default"]
 
 [tool.ruff]
 line-length = 110

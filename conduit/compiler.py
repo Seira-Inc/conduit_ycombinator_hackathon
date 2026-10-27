@@ -14,6 +14,7 @@ from .compiler_model import InferenceFailure, infer
 from .evidence import EvidenceCollector, prompt_evidence
 from .grounding import Ledger, first_party_text, write_targets
 from .learning_state import LearningState
+from .login import recently_signed_in
 from .models import Tool, origin
 from .net import NetworkPolicy
 from .probes import probe_document, recover_probe
@@ -426,6 +427,15 @@ async def compile_connector(runtime, *, progress=None, model=None, max_rounds=8,
                 report["resumed"] = True
                 feedback.append({"instruction": "Continue from the earlier learning observations below. The browser was reopened; "
                     "use current page/network evidence for live state. Do not replay any previous mutation."})
+            await update("Checking the sign-in")
+            state, reason = await session.check_sign_in()
+            runtime.remember_sign_in(state, reason)
+            # Nothing is spent on a site Seira can't confirm you're signed in to, unless you signed in
+            # moments ago and the site simply shows no sign of it.
+            if state == "signed_out" or (state == "unsure" and not recently_signed_in(manifest)):
+                report.update(status="login_required", sign_in_reason=reason,
+                              message="Sign in, then Conduit will learn and test CRUD operations.")
+                return report
             await update("Inspecting the signed-in website and its data-changing operations")
             session.clear_sign_in_signals()
             evidence = await collector.collect()
@@ -436,6 +446,7 @@ async def compile_connector(runtime, *, progress=None, model=None, max_rounds=8,
                     continue
             signal, reason = await session.sign_in_state()
             if signal == "strong" or any(c.get("type") == "password" for c in evidence["page"]["controls"]):
+                runtime.remember_sign_in("signed_out", reason)
                 report.update(status="login_required", sign_in_reason=reason,
                               message="Sign in, then Conduit will learn and test CRUD operations.")
                 return report
