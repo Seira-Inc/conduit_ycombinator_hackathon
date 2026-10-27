@@ -427,14 +427,17 @@ async def compile_connector(runtime, *, progress=None, model=None, max_rounds=8,
                 feedback.append({"instruction": "Continue from the earlier learning observations below. The browser was reopened; "
                     "use current page/network evidence for live state. Do not replay any previous mutation."})
             await update("Inspecting the signed-in website and its data-changing operations")
+            session.clear_sign_in_signals()
             evidence = await collector.collect()
             for source in [s for s in prior_sources if s.get("kind") == "documentation"][-5:]:
                 try:
                     await collector.public(source["url"])
                 except Exception:
                     continue
-            if any(c.get("type") == "password" for c in evidence["page"]["controls"]):
-                report.update(status="login_required", message="Sign in, then Conduit will learn and test CRUD operations.")
+            signal, reason = await session.sign_in_state()
+            if signal == "strong" or any(c.get("type") == "password" for c in evidence["page"]["controls"]):
+                report.update(status="login_required", sign_in_reason=reason,
+                              message="Sign in, then Conduit will learn and test CRUD operations.")
                 return report
             if research and not report.get("resumed"):
                 await update("Looking for official API descriptions, source code, and documented app commands")

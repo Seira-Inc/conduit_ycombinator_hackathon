@@ -39,7 +39,7 @@ def family_for(base, field="title"):
 
 
 async def login(runtime, account="tester"):
-    runtime.acquire_browser()
+    await runtime.acquire_browser()
     await runtime.browser.start()
     await runtime.browser.page.get_by_label("Account").fill(account)
     await runtime.browser.page.get_by_role("button", name="Sign in").click()
@@ -153,7 +153,7 @@ async def test_canvas_document_crud_preserves_other_shapes(tmp_path):
         manifest = Manifest(id="canvas-test", name="Canvas", target=url + "/canvas", kind="website", allowed_origins=[url], allow_private=True)
         runtime = Runtime(manifest, tmp_path)
         try:
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             await runtime.browser.start()
             await runtime.browser.page.evaluate("""() => localStorage.setItem('drawing',JSON.stringify({elements:[
                 {id:'existing',x:400,y:30,width:40,height:40,fill:'green',label:'Keep me'}]}))""")
@@ -263,7 +263,7 @@ async def test_document_change_between_export_and_import_is_preserved(tmp_path):
         manifest = Manifest(id="conflict", name="Conflict", target=url + "/canvas", kind="website", allowed_origins=[url], allow_private=True, file_access="downloads")
         runtime = Runtime(manifest, tmp_path)
         try:
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             runner = ProgramRunner(runtime.browser, manifest)
             old, _ = await runner.run(Program(steps=[{"kind": "download", "locator": {"css": "#export"}, "name": "doc"}], result=ref("vars.doc")), {})
             assert not await runtime.browser.page.evaluate("'showOpenFilePicker' in window")

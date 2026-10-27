@@ -156,6 +156,9 @@ class BrowserSession:
         self._login_checkpoint_saved = False
         self.session_loaded_mtime = None
         self.last_save_refusal = None
+        self.off_site = None
+        self.auth_challenge = False
+        self.login_return_wait = 3.0
         self._login_activity = asyncio.Event()
         self.final_save_timeout = 30
         self.auth_restore_deadline = 0.0
@@ -165,6 +168,7 @@ class BrowserSession:
     async def start(self):
         if self.context is not None:
             return
+        self.clear_sign_in_signals()
         self.playwright = await async_playwright().start()
         preferred = os.environ.get("CONDUIT_BROWSER_CHANNEL")
         channels = (
@@ -206,6 +210,7 @@ class BrowserSession:
                   delete window.showDirectoryPicker;
                 })();""")
             self.recorder.attach(self.context)
+            self.context.on("response", self._watch_response)
             await self.context.route("**/*", self._route)
             self.page = await self.context.new_page()
             if self.manual_login:
@@ -233,6 +238,8 @@ class BrowserSession:
                     if not navigable and self._main_frame_request(route.request):
                         self._note_login_origin(destination)
                 elif not navigable:
+                    if self._is_page_navigation(route.request):
+                        self.off_site = destination
                     return await route.abort()
             key = (destination, self.manifest.allow_private)
             if time.monotonic() - self.checked_hosts.get(key, -100) > 60:
@@ -241,6 +248,71 @@ class BrowserSession:
             await route.continue_()
         except Exception:
             await route.abort()
+
+    def _is_page_navigation(self, request) -> bool:
+        # The main frame only: popups and hidden single-sign-on frames are refused even when the
+        # session is fine, so they say nothing about it.
+        try:
+            return self.page is not None and request.frame == self.page.main_frame
+        except PlaywrightError:
+            return False
+
+    def _watch_response(self, response):
+        """A server-side redirect is not offered to the route handler, so a page load answered with a
+        redirect off the site, or with 401, is noted here."""
+        try:
+            request = response.request
+            if self.manual_login or not request.is_navigation_request() or not self._is_page_navigation(request):
+                return
+            if response.status == 401:
+                self.auth_challenge = True
+            elif 300 <= response.status < 400 and response.headers.get("location"):
+                target = urljoin(response.url, response.headers["location"])
+                if target.startswith(("http://", "https://")):
+                    destination = origin(target)
+                    if (destination not in self.manifest.allowed_origins
+                            and destination not in self.manifest.login_origins):
+                        self.off_site = destination
+        except Exception:
+            return
+
+    def clear_sign_in_signals(self):
+        self.off_site, self.auth_challenge = None, False
+
+    async def sign_in_state(self) -> tuple[str | None, str | None]:
+        """("strong" | "weak" | "signed_in" | None, reason). Strong means signed out for certain:
+        the site sent the browser elsewhere, answered 401, left it on a sign-in page, or shows a
+        password field. Weak is a sign-in form without a password field yet (email-first logins)."""
+        if self.context is None:
+            return None, None
+        if self.off_site:
+            return "strong", f"the site sent the browser to {self.off_site}"
+        if self.auth_challenge:
+            return "strong", "the site answered 401"
+        page = self.page if self.page and not self.page.is_closed() else None
+        if page is None:
+            return None, None
+        if page.url.startswith(("http://", "https://")):
+            here = origin(page.url)
+            if here not in self.manifest.allowed_origins:
+                if here in self.manifest.login_origins:
+                    deadline = time.monotonic() + self.login_return_wait
+                    while time.monotonic() < deadline and origin(page.url) not in self.manifest.allowed_origins:
+                        await asyncio.sleep(0.25)
+                    if origin(page.url) not in self.manifest.allowed_origins:
+                        return "strong", f"the browser stayed on the sign-in site {origin(page.url)}"
+                else:
+                    return "strong", f"the browser is on {here}"
+        with suppress(PlaywrightError, TimeoutError):
+            await page.wait_for_load_state("domcontentloaded", timeout=2000)
+        facts = await fingerprint(page)
+        if facts.get("password_inputs"):
+            return "strong", "a password field is visible"
+        if facts.get("sign_out_controls"):
+            return "signed_in", "a sign-out control is visible"
+        if facts.get("identity_inputs") and facts.get("sign_in_controls"):
+            return "weak", "a sign-in form is visible"
+        return None, None
 
     @staticmethod
     def _main_frame_request(request):
@@ -457,6 +529,8 @@ class BrowserSession:
         page = self.page if self.page and not self.page.is_closed() else None
         if page is None or not page.url.startswith(("http://", "https://")):
             return None
+        if not self.manual_login and origin(page.url) not in self.manifest.allowed_origins:
+            return "the page is on another site"
         return looks_signed_out(await fingerprint(page))
 
     async def save(self) -> bool:

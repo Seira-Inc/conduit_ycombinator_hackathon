@@ -10,9 +10,12 @@ FACTS = """() => {
   const label = e => (e.innerText || e.value || e.getAttribute('aria-label') || '').trim();
   const controls = [...document.querySelectorAll('a,button,[role=button],[role=link],input[type=submit]')]
     .filter(visible);
-  const signIn = /\\b(sign|log)\\s?in\\b/i, signOut = /\\b(sign|log)\\s?out\\b/i;
+  const signIn = /\\b(sign|log)[\\s-]?in\\b/i, signOut = /\\b(sign|log)[\\s-]?out\\b/i;
+  const identity = 'input[type=email],input[autocomplete=username],input[name*=user i],input[name*=login i],'
+    + 'input[name*=email i],input[id*=email i]';
   return {
     password_inputs: [...document.querySelectorAll('input[type=password]')].filter(visible).length,
+    identity_inputs: [...document.querySelectorAll(identity)].filter(visible).length,
     sign_in_controls: controls.filter(e => signIn.test(label(e))).length,
     sign_out_controls: controls.filter(e => signOut.test(label(e))).length,
     text: (document.body ? document.body.innerText : '').slice(0, 4000),
@@ -23,7 +26,7 @@ HINT = "pass --logged-in-text with words only a signed-in page shows"
 
 async def fingerprint(page) -> dict:
     """Login-relevant facts about the current page, never field values."""
-    facts = {"password_inputs": 0, "sign_in_controls": 0, "sign_out_controls": 0, "text": ""}
+    facts = {"password_inputs": 0, "identity_inputs": 0, "sign_in_controls": 0, "sign_out_controls": 0, "text": ""}
     with suppress(PlaywrightError):
         facts = await page.evaluate(FACTS)
     title = ""

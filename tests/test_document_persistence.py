@@ -17,11 +17,11 @@ async def test_visible_canvas_edit_needs_durable_save_before_restart(tmp_path, m
         runtime = Runtime(manifest, tmp_path)
         family = canvas_family()
         try:
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             executor = FamilyExecutor(runtime.browser, manifest, family)
             made = await executor.call("create", {**family.create_input, "label": "Conduit unsaved"})
             await runtime.close()
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             assert await executor.read(made["id"]) is None  # In-memory readback alone falsely looked successful.
             family.persistence = Program(steps=[{"kind": "poll", "attempts": 10, "interval_ms": 200,
                 "steps": [{"kind": "set", "name": "stored", "value": {"$storage": {"key": "drawing"}}}],
@@ -31,15 +31,15 @@ async def test_visible_canvas_edit_needs_durable_save_before_restart(tmp_path, m
             made = await executor.call("create", {**family.create_input, "label": "Conduit saved"})
             assert made["metrics"]["model_calls"] == 0
             await runtime.close()
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             assert (await executor.read(made["id"]))["label"] == "Conduit saved"
             await executor.call("update", {"id": made["id"], "fill": "blue", "label": "Conduit edited"})
             await runtime.close()
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             assert (await executor.read(made["id"]))["label"] == "Conduit edited"
             await executor.call("delete", {"id": made["id"]})
             await runtime.close()
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             assert await executor.read(made["id"]) is None
         finally:
             await runtime.close()

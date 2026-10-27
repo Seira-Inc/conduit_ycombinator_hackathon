@@ -18,7 +18,7 @@ async def test_draw_probe_restores_document_with_multistep_guard(tmp_path, javas
                             allowed_origins=[url], allow_private=True, file_access="downloads")
         runtime = Runtime(manifest, tmp_path)
         try:
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             await runtime.browser.start()
             original = {"elements": [{"id": "existing", "x": 500, "y": 20, "width": 40,
                                        "height": 30, "fill": "green", "label": "Keep me"}]}
@@ -63,7 +63,7 @@ async def test_failed_restore_can_be_repaired_without_redrawing(tmp_path, concur
                             allowed_origins=[url], allow_private=True)
         runtime = Runtime(manifest, tmp_path)
         try:
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             await runtime.browser.start()
             inspection = {"steps": [{"kind": "download", "locator": {"css": "#export"}, "name": "doc"}],
                           "result": {"$ref": "vars.doc"}}

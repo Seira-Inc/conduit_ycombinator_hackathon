@@ -6,7 +6,6 @@ conduit/messages.py; internal codes and messages stay in the local logs."""
 from __future__ import annotations
 
 import json
-import secrets
 import time
 import weakref
 
@@ -19,6 +18,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from .audit import Audit, ErrorLog, argument_hash
 from .checker import rerank
 from .keep import degrade, should_degrade
+from .links import Links
 from .messages import (
     describe,
     failure,
@@ -40,7 +40,6 @@ from .runtime import InvalidArguments, ToolUnavailable
 from .session_lock import SessionBusy
 from .users import LOCAL, Users, hidden, refused
 
-CONFIRM_TOKEN = {"type": "string"}
 CONFIRM_FORM = {"type": "object", "properties": {"confirm": {
     "type": "boolean", "title": "Delete it", "description": "Yes deletes it; No leaves it untouched."}},
     "required": ["confirm"]}
@@ -159,10 +158,12 @@ class McpEndpoint:
 def build_gateway(*, registry: Registry, runtime_for, compile_jobs: dict, jobs: dict,
                   start_build=None, start_compilation=None, persist=None, cancel_job=None,
                   model_available=lambda: True, audit: Audit | None = None, errors: ErrorLog | None = None,
-                  start_repair=None, users: Users | None = None, home=None, sign_in_link=None) -> GatewayServer:
+                  start_repair=None, users: Users | None = None, home=None, links: Links | None = None,
+                  signing_in: set | None = None) -> GatewayServer:
     server = GatewayServer("seira", version="0.3.0", instructions=INSTRUCTIONS)
     sessions = weakref.WeakSet()
-    confirmations: dict[str, tuple[str, str, float]] = {}
+    links = links if links is not None else Links()
+    signing_in = signing_in if signing_in is not None else set()
 
     def request():
         try:
@@ -180,10 +181,12 @@ def build_gateway(*, registry: Registry, runtime_for, compile_jobs: dict, jobs: 
             return LOCAL
         return users.by_key(bearer_key(incoming.headers))
 
-    def link(connector_id: str) -> str:
+    def base_url() -> str:
         incoming = request()
-        base = str(incoming.base_url) if incoming is not None else DEFAULT_BASE
-        return sign_in_link(connector_id, base) if sign_in_link else base
+        return str(incoming.base_url) if incoming is not None else DEFAULT_BASE
+
+    def link(connector_id: str) -> str:
+        return base_url() + "signin/" + links.sign_in(connector_id)
 
     def record(**fields):
         if audit is not None:
@@ -218,15 +221,12 @@ def build_gateway(*, registry: Registry, runtime_for, compile_jobs: dict, jobs: 
         return capability is not None and (capability.form is not None or capability.url is None)
 
     async def confirmed(entry, name: str, arguments: dict) -> tuple[str | None, types.CallToolResult | None]:
-        """(how the delete was approved, None) or (None, the result to return instead of running it)."""
-        token = arguments.pop("confirm_token", None)
+        """(how the delete was approved, None) or (None, the result to return instead of running it).
+        The person approves, never the agent: through the client's own form where it has one,
+        otherwise through a link that only a click on its page can approve."""
         digest = argument_hash(arguments)
-        if token:
-            pending = confirmations.get(token)
-            if pending is None or pending[:2] != (name, digest) or pending[2] < time.time():
-                return None, failure(sentence("confirmation_expired"))
-            del confirmations[token]
-            return "confirm_token", None
+        if links.consume_approval(name, digest):
+            return "approval_link", None
         if supports_form_elicitation():
             question = (f"Delete the {thing(entry.resource)}{id_note(arguments.get('id'))} on "
                         f"{site_label(entry.site)}? This can't be undone.")
@@ -236,11 +236,9 @@ def build_gateway(*, registry: Registry, runtime_for, compile_jobs: dict, jobs: 
             record(tool=name, connector_id=entry.connector_id, verb=entry.verb, arguments=digest,
                    approval="elicitation", outcome="not_confirmed")
             return None, failure(sentence("not_approved"))
-        for stale in [t for t, (_, _, expires) in confirmations.items() if expires < time.time()]:
-            del confirmations[stale]
-        token = secrets.token_urlsafe(12)
-        confirmations[token] = (name, digest, time.time() + 600)
-        text, _ = say("confirm_with_token", entry, object_id=arguments.get("id"), token=token)
+        token = links.approval(name, digest, {"site": site_label(entry.site), "thing": thing(entry.resource),
+                                              "id_note": id_note(arguments.get("id"))})
+        text, _ = say("approval_required", entry, object_id=arguments.get("id"), link=base_url() + "approve/" + token)
         return None, failure(text)
 
     def remember_session():
@@ -259,12 +257,9 @@ def build_gateway(*, registry: Registry, runtime_for, compile_jobs: dict, jobs: 
     server.notify_tools_changed = notify_tools_changed
 
     def tool_for(entry) -> types.Tool:
-        schema = public_schema(entry.input_schema)
-        if entry.verb == "delete":
-            schema = {**schema, "properties": {**schema.get("properties", {}), "confirm_token": CONFIRM_TOKEN}}
         return types.Tool(
             name=entry.name, description=describe(entry.site, entry.resource, entry.verb),
-            inputSchema=schema, outputSchema=public_output_schema(entry.output_schema),
+            inputSchema=public_schema(entry.input_schema), outputSchema=public_output_schema(entry.output_schema),
             annotations=types.ToolAnnotations(readOnlyHint=entry.read_only,
                                               destructiveHint=entry.verb in ("update", "delete"),
                                               idempotentHint=entry.read_only, openWorldHint=True))
@@ -355,6 +350,8 @@ def build_gateway(*, registry: Registry, runtime_for, compile_jobs: dict, jobs: 
             job = jobs.get(job_id, job)
         child = jobs.get(job.get("compile_job_id", ""))
         current = child or job
+        while current.get("resumed_as") in jobs:
+            current = jobs[current["resumed_as"]]
         connector_id = current.get("connector_id") or job.get("connector_id")
         site = site_label(connector_site(connector_id)) if connector_id else "the site"
         result = current.get("result")
@@ -491,7 +488,9 @@ def build_gateway(*, registry: Registry, runtime_for, compile_jobs: dict, jobs: 
             return "unavailable"
         return "temporarily_unavailable"
 
-    @server.call_tool()
+    # The SDK's own input check answers with raw schema text that can echo the arguments; the
+    # runtime checks the same schema and gets a plain sentence instead.
+    @server.call_tool(validate_input=False)
     async def call_tool(name: str, arguments: dict):
         arguments = arguments or {}
         if name == "seira_find":
@@ -515,7 +514,7 @@ def build_gateway(*, registry: Registry, runtime_for, compile_jobs: dict, jobs: 
             record(tool=name, connector_id=entry.connector_id, verb=entry.verb, arguments=argument_hash(arguments),
                    approval="none", outcome="forbidden")
             return failure(sentence("blocked"))
-        if entry.connector_id in compile_jobs:
+        if entry.connector_id in compile_jobs or entry.connector_id in signing_in:
             return failure(say("busy", entry)[0])
         approval = "client"
         if entry.verb == "delete":

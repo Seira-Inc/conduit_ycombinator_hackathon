@@ -12,6 +12,8 @@ from conduit.compiler import publish
 from conduit.keep import seconds_until, should_degrade
 from conduit.programs import ProgramError
 
+SIGN = r"http://127\.0\.0\.1:4455/signin/[A-Za-z0-9_-]{22}"
+
 
 def failing_with(*errors):
     queue = iter(errors)
@@ -75,7 +77,7 @@ async def test_user_errors_keep_the_tool_and_a_sign_out_says_how_to_sign_in(app,
         refused = (await session.call_tool(READ, {"id": "r1"})).content[0].text
         listed = {t.name for t in (await session.list_tools()).tools}
     assert missing == "There's no record with that ID on example.com." and READ in listed
-    assert refused == "Example.com refused this. You may need to sign in again: http://127.0.0.1:4455/"
+    assert re.fullmatch(r"Example\.com refused this\. You may need to sign in again: http://127\.0\.0\.1:4455/signin/[A-Za-z0-9_-]{22}", refused)
     assert not app.state.jobs
 
 
@@ -102,6 +104,9 @@ async def test_daily_check_records_whether_each_site_is_still_signed_in(app, mon
 
         async def save(self):
             return True
+
+        async def sign_in_state(self):
+            return "strong", "a password field is visible"
 
         async def close(self):
             self.context = None

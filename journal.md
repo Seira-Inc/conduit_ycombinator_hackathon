@@ -33,6 +33,41 @@ Iminabo"). Iminabo amended and extended them on 2026-10-18, in `docs/SYSTEM_DESI
 6. **Tier 0 runs local-only first.** No tunnel, no VPS: gateway and runtime on one machine until
    the loop works end to end. Customer zero is Iminabo until the others are free.
 
+## 2026-10-27 — messages a lawyer can read, and sign-outs that never break a tool
+
+**Why.** Iminabo's first Forms test hit an expired Microsoft sign-in. Seira read it as a broken
+program, hid the Forms tools, started a paid repair that could never work, and showed him a raw
+error with a stack trace, `degraded: true` and a job id. His objections: users must never see
+internals, they confuse a lawyer and inform a malicious agent; and nothing a user sees may ask
+for a terminal. An independent review of every message the gateway and the hub send found the
+same problem across the board (see `problems_encountered.md`, 2026-10-27).
+
+**What changed.**
+- `conduit/messages.py`: every failure is one fixed sentence filled only with values Seira
+  controls. An uncertain write always says not to repeat it. Failures carry an 8-character
+  reference; the redacted detail goes to `errors.jsonl` (30 days, `/api/errors/<ref>`).
+- Receipts, their advertised schemas, tool descriptions, input schemas, `seira_find`,
+  `seira_build`, `seira_status` and the capabilities resource show nothing internal and nothing
+  written by a website or the compiler model.
+- Sign-outs: the runtime judges the sign-in at the moment a program fails (strong, weak or signed
+  in). A sign-out answers "You're signed out of <site>. Sign in here, then ask again: <link>" and
+  never withdraws a tool; 403 with signed-in evidence answers "no access". The compiler and the
+  daily check use the same judgement.
+- Links (`conduit/links.py`): a sign-in link opens a page whose button opens the sign-in window
+  on this computer, waits up to 10 minutes, saves the session and resumes a build that waited for
+  it. A delete is approved by Seira's own elicitation question or by a link with Delete / Don't
+  delete buttons; the agent can no longer approve it.
+- The Desktop hub is a stdio bridge to `/mcp`, so Claude Desktop gets the same rules.
+- Decisions taken with Iminabo: approval links for deletes; in Tier 0 whoever meets a sign-out
+  gets the link (one person, one machine); per-person logins wait for Tier 1.
+
+**Tests.** Fast suite 216 passed, 1 skipped (was 192). Integration: the new sign-in tests and the
+hub test through the bridge pass. Two write-grounding tests and one document test fail, the same
+way on the commit before these changes; logged as open.
+
+**Forms restored.** The wrongly withdrawn `forms` capability is back to ready (backup kept). The
+Microsoft session itself is still expired: the next call will answer with the sign-in link.
+
 ## 2026-10-19 — the venv moves to Python 3.14 so `python` runs again
 
 Smart App Control started blocking the uv-built venv's unsigned `python.exe` (see

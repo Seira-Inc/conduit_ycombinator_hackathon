@@ -124,6 +124,22 @@ def local_site():
                     ("<h1>" + ("Signed in" if signed_in else "Signed out") + "</h1>").encode(),
                     content_type="text/html",
                 )
+            if path == "/offsite":
+                self.send_response(302)
+                self.send_header("Location", f"http://localhost:{self.server.server_port}/session")
+                self.end_headers()
+                return
+            if path == "/protected":
+                self.send_response(302)
+                self.send_header("Location", "/signin")
+                self.end_headers()
+                return
+            if path == "/signin":
+                return self.send(
+                    b"""<!doctype html><title>Sign in</title><label>Email<input type="email" name="email"></label>"""
+                    b"""<label>Password<input type="password" name="password"></label><button>Sign in</button>""",
+                    content_type="text/html",
+                )
             if path == "/redirect":
                 self.send_response(302)
                 self.send_header("Location", "http://localhost:1/outside")

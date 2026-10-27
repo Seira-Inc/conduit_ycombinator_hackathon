@@ -9,6 +9,49 @@ Dates are local (America/Chicago).
 Items with no single discovery date live under **Carried over from research** at the bottom; the
 full account of each is in `docs/research/problems_encountered.md`.
 
+## 2026-10-27
+
+- **[resolved] An expired Microsoft sign-in became a paid repair and a raw error.** Forms
+  redirected to `login.microsoftonline.com`, not in the connector's allowed or login origins, so
+  the browser aborted the redirect; the JavaScript program found no user info and failed
+  `javascript_failed`. Keep read that as a broken program: it hid the Forms tools and queued a
+  repair that spent 3 model passes before Iminabo cancelled it. The user saw the internal code, a
+  stack trace with escape characters, `degraded: true` and a job id. Fixed: the runtime judges the
+  sign-in when a program fails, while it still holds the browser (aborted off-site navigation,
+  off-site redirect, 401, a page left on another site or a login origin, a password field); a
+  sign-out answers with a sign-in link and never degrades; the compiler and the daily check use
+  the same judgement, so a signed-out repair stops before any model call. The Forms tools were
+  restored by hand (backup `connector.before-undegrade.json`).
+
+- **[resolved] Users saw internals and developer instructions.** Gateway errors carried internal
+  codes, stack traces, raw Playwright and pydantic text, connector and job ids, `python -m conduit`
+  commands and `.env`. Tool descriptions and schemas carried page titles and compiler-model text,
+  a path for instructions planted in a website to reach the client. Fixed with `conduit/messages.py`
+  (one sentence per situation, references into `errors.jsonl`) and projected receipts, schemas
+  and meta-tool outputs.
+
+- **[resolved] The agent could approve its own delete.** The `confirm_token` came back in the
+  same message the agent read. Replaced by Seira's own elicitation question or an approval link
+  whose page only a click approves.
+
+- **[resolved] The Desktop hub skipped the gateway's rules.** It proxied the dashboard's `/call`,
+  so blocks, delete approval, withdrawn tools, the audit log and the new messages did not apply.
+  It is now a stdio bridge to `/mcp`.
+
+- **[OPEN] Two write-grounding tests fail: a learned program that writes to a path never observed
+  on the site is accepted.** `test_write_grounding.py::test_steps_create_to_an_unobserved_path_is_rejected_before_it_is_sent`
+  and `::test_javascript_create_to_an_unobserved_path_is_blocked_by_the_runtime_backstop` end
+  `ready` instead of `incomplete`. They fail the same way on `6c6af50`, before today's changes;
+  never run in this repo until today. This is the guard that keeps an invented write endpoint off
+  a real account, so it needs its own investigation.
+
+- **[OPEN] `test_document_compiler.py::test_failed_document_navigation_is_reconciled_by_fresh_full_export`
+  fails** (`KeyError: 'creation_no_effect_confirmed'`), also on `6c6af50`.
+
+- **[note] Server-side redirects never reach Playwright's route handler**, so a 302 to a login page
+  is caught from the response event instead; confirmed by the `/offsite` and `/protected` routes in
+  `tests/test_signin.py`.
+
 ## 2026-10-19
 
 - **[resolved] Windows blocked the venv's Python: "An Application Control policy has blocked this

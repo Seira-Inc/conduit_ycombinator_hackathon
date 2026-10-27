@@ -102,6 +102,7 @@ class Runtime:
             if fingerprint(tool.config["family"]) != tool.config.get("fingerprint"):
                 raise ToolUnavailable("The compiled program changed; recompile and verify before running it")
             await self.acquire_browser()
+            self.browser.clear_sign_in_signals()
             try:
                 return await FamilyExecutor(self.browser, self.manifest, tool.config["family"]).call(
                     tool.operation, arguments)
@@ -109,6 +110,11 @@ class Runtime:
                 for resource in self.manifest.capabilities:
                     if resource.get("resource") == tool.resource:
                         resource["last_error"] = {"code": exc.code, "uncertain": exc.uncertain}
+                # Judged now, while this call still holds the browser and before anything moves the page.
+                try:
+                    exc.sign_in, exc.sign_in_reason = await self.browser.sign_in_state()
+                except Exception:
+                    exc.sign_in, exc.sign_in_reason = None, None
                 raise
         if tool.adapter == "agent":
             from .agent import run_task

@@ -112,7 +112,7 @@ async def test_imported_operation_portable_and_universal_mcp(tmp_path):
             cleanup = Runtime(imported, home)
             try:
                 for result in (item, control):
-                    cleanup.acquire_browser()
+                    await cleanup.acquire_browser()
                     await FamilyExecutor(cleanup.browser, imported, family.model_dump()).call(
                         "delete", {"id": result["id"]})
                 assert not state["items"]["tester"]

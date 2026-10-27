@@ -49,7 +49,7 @@ async def test_document_recipe_generates_tested_mcp_without_model_execution(tmp_
             assert result["mcp_test"]["status"] == "passed"
             assert result["mcp_test"]["restarts"] == 2
             family = next(t.config["family"] for t in manifest.tools if t.adapter == "program")
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             executor = FamilyExecutor(runtime.browser, manifest, family)
             made = await executor.call("create", {"label": "Conduit held-out", "fill": "green"})
             await executor.call("update", {"id": made["id"], "label": "Conduit changed"})
@@ -90,7 +90,7 @@ async def test_failed_document_navigation_is_reconciled_by_fresh_full_export(tmp
             {"kind": "press", "locator": {"css": "body"}, "value": "Escape"},
             {"kind": "assert", "value": False}]
         try:
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             report = await verify_family(runtime.browser, manifest, compile_document(source))
             assert report["status"] == "incomplete"
             assert report["creation_no_effect_confirmed"] is True

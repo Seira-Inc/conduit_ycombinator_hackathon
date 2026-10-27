@@ -60,7 +60,7 @@ async def test_stale_content_is_rejected_when_vendor_revision_never_changes(tmp_
             current = await executor.call("read", {"id": key})
             await runtime.close()
             runtime = Runtime(manifest, tmp_path)
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             executor = FamilyExecutor(runtime.browser, manifest, family)
             updated = await executor.call("update", {"id": key, "title": "Requested",
                                                     "expected_state_token": current["state_token"]})

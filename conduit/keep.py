@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import time
+from contextlib import suppress
 from datetime import datetime, timedelta
 
-from .login import fingerprint, looks_signed_out
 from .operation_import import verified_program
 
 # Codes that mean the program no longer fits the site. A missing record, a stale token, a sign-out
@@ -61,8 +61,11 @@ async def daily_check(manifests, runtime_for, *, has_session, busy, write, audit
             try:
                 await runtime.acquire_browser()
                 await runtime.browser.start()
-                reason = looks_signed_out(await fingerprint(runtime.browser.page))
-                row.update(status="signed_out" if reason else "signed_in", reason=reason)
+                with suppress(Exception):
+                    await runtime.browser.page.wait_for_load_state("networkidle", timeout=10000)
+                signal, reason = await runtime.browser.sign_in_state()
+                status = {"strong": "signed_out", "weak": "maybe_signed_out"}.get(signal, "signed_in")
+                row.update(status=status, reason=reason if status != "signed_in" else None)
             except Exception as exc:
                 row.update(status="error", reason=f"{type(exc).__name__}: {str(exc)[:200]}")
             finally:

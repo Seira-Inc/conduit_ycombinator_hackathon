@@ -59,6 +59,7 @@ def main():
     optimizer.add_argument("--rounds", type=int, choices=range(1, 5), default=2)
     hub = commands.add_parser("hub", help="One MCP server for verified tools in the local dashboard")
     hub.add_argument("--url", default="http://127.0.0.1:4455")
+    hub.add_argument("--key", help="A Seira user key, when the gateway has users (default: SEIRA_KEY)")
     serve = commands.add_parser("serve", help="Serve a generated connector over MCP stdio")
     serve.add_argument("manifest", type=Path)
     serve.add_argument("--read-only", action="store_true")
@@ -108,7 +109,7 @@ def main():
             run(args.manifest, home=args.home, read_only=args.read_only, headed=args.headed)
         elif args.command == "hub":
             from .hub import serve_hub
-            asyncio.run(serve_hub(args.url))
+            asyncio.run(serve_hub(args.url, args.key))
         elif args.command == "import-operation":
             from .operation_import import import_operation
             manifest, directory = import_operation(args.directory, Store(args.home), session_home=args.session_home)

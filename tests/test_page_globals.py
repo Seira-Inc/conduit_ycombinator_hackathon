@@ -142,7 +142,7 @@ async def test_inline_script_antiforgery_token_binds_at_call_time(tmp_path, java
                             allowed_origins=[url], allow_private=True)
         runtime = Runtime(manifest, tmp_path)
         try:
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             await runtime.browser.start()
             family = javascript_family() if javascript else steps_family()
             report = await verify_family(runtime.browser, manifest, family)

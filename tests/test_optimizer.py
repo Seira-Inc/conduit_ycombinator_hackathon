@@ -136,7 +136,7 @@ async def test_failed_reference_check_in_exported_mcp_does_not_publish_candidate
             assert state["writes"] == writes
             # Fresh baseline reads identify the isolated test objects for independent fixture cleanup.
             for key in list(state["items"]["tester"]):
-                runtime.acquire_browser()
+                await runtime.acquire_browser()
                 actual = await FamilyExecutor(runtime.browser, manifest, baseline).read(key)
                 assert actual["title"].startswith("Conduit ")
                 await runtime.call("records_delete", {"id": key})

@@ -91,7 +91,7 @@ async def test_form_rpc_crud_uses_current_nested_account_session(tmp_path, trans
                             allowed_origins=[url], allow_private=True)
         runtime = Runtime(manifest, tmp_path)
         try:
-            runtime.acquire_browser()
+            await runtime.acquire_browser()
             await runtime.browser.start()
             await runtime.browser.page.evaluate("""token => {
                 localStorage.setItem('app_config',JSON.stringify({teams:{A:{token:'wrong-first-account'},B:{token}}}));

@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import time
 import zipfile
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -22,7 +23,9 @@ from .discovery import discover, refresh_forms
 from .gateway import build_gateway, mount_gateway
 from .generator import Store
 from .keep import daily_check, seconds_until
-from .login import confirm, fingerprint
+from .links import Links, page
+from .login import confirm, fingerprint, watch_for_sign_in
+from .messages import site_label
 from .models import BuildRequest, StrictModel
 from .programs import ProgramError
 from .registry import Registry
@@ -32,6 +35,7 @@ from .tool_results import error_payload, safe_message
 from .users import Users
 
 STATIC = Path(__file__).with_name("static")
+SIGN_IN_WAIT = 600
 
 
 class CallRequest(StrictModel):
@@ -48,6 +52,8 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
     runtimes, jobs, tasks, job_tasks = {}, {}, set(), {}
     build_slots = asyncio.Semaphore(2)
     compile_jobs = {}
+    links = Links()
+    signing_in: set[str] = set()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -74,15 +80,19 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
     app.state.runtimes = runtimes
     app.state.jobs = jobs
     app.state.compile_jobs = compile_jobs
+    app.state.links = links
+    app.state.signing_in = signing_in
 
     @app.middleware("http")
     async def local_requests(request: Request, call_next):
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             origin_header = request.headers.get("origin")
             expected = f"{request.url.scheme}://{request.headers.get('host')}"
-            # The MCP endpoint has no dashboard page behind it; the SDK's host and origin checks
-            # guard it instead of the local header. A foreign Origin is still refused here.
-            local = request.headers.get("x-conduit-local") == "1" or request.url.path == "/mcp"
+            # The MCP endpoint and the sign-in and approval pages have no dashboard script behind
+            # them: the SDK's checks guard /mcp, and an unguessable one-use token guards the pages.
+            # A foreign Origin is still refused here.
+            local = (request.headers.get("x-conduit-local") == "1" or request.url.path == "/mcp"
+                     or request.url.path.startswith(("/signin/", "/approve/")))
             if (origin_header and origin_header != expected) or not local:
                 return JSONResponse(
                     {"detail": "This action must originate from the local Conduit dashboard."},
@@ -142,7 +152,7 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
         job_id = uuid4().hex
         prune_jobs()
         jobs[job_id] = {"id": job_id, "status": "queued", "connector_id": connector_id,
-                        "kind": "repair" if resource else "compile", "resource": resource,
+                        "kind": "repair" if resource else "compile", "resource": resource, "brief": brief,
                         "messages": [f"Repairing {resource}" if resource else "Preparing CRUD learning and tests"]}
         compile_jobs[connector_id] = job_id
         async def worker():
@@ -178,6 +188,131 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
 
     def start_repair(connector_id, resource) -> str:
         return start_compilation(connector_id, resource=resource)["job_id"]
+
+    def resume_after_sign_in(connector_id):
+        """A build or repair that stopped for this sign-in starts again with the same request."""
+        for job in list(jobs.values()):
+            result = job.get("result")
+            if (job.get("connector_id") == connector_id and job.get("kind") in ("compile", "repair")
+                    and job["status"] == "complete" and not job.get("resumed_as")
+                    and isinstance(result, dict) and result.get("status") == "login_required"):
+                job["resumed_as"] = start_compilation(connector_id, job.get("brief"),
+                                                      resource=job.get("resource"))["job_id"]
+                return
+
+    async def run_sign_in(connector_id, link):
+        """Open a sign-in window on this computer, wait for the person to sign in, save the session
+        and check it. Calls on this connector answer busy meanwhile instead of waiting."""
+        runtime = runtime_for(connector_id)
+        signing_in.add(connector_id)
+        check = {"verified": False}
+        try:
+            async with runtime.lock:
+                await runtime.close()
+                await runtime.acquire_browser()
+                runtime.browser = BrowserSession(runtime.manifest, store.home, headed=True)
+                runtime.browser.manual_login = True
+                await runtime.browser.start()
+                before = await fingerprint(runtime.browser.page)
+                link["progress"] = "waiting"
+                await watch_for_sign_in(runtime.browser, before, SIGN_IN_WAIT)
+                await runtime.browser.finish_login()
+                await runtime.browser.close()
+                runtime.browser = BrowserSession(runtime.manifest, store.home)
+                check = await confirm(runtime.browser, before)
+                runtime.manifest.findings.append({"type": "login_check", **check})
+                store.write(runtime.manifest)
+                runtime.manifest_mtime = manifest_mtime(connector_id)
+                await runtime.close()
+            link["progress"] = "signed_in" if check["verified"] else "not_verified"
+        except Exception as exc:
+            link["progress"], link["error"] = "failed", type(exc).__name__
+            with suppress(Exception):
+                await runtime.close(save=False)
+        finally:
+            signing_in.discard(connector_id)
+        if check["verified"]:
+            resume_after_sign_in(connector_id)
+            await gateway.notify_tools_changed()
+
+    def expired_page():
+        return HTMLResponse(page("This link has expired", [
+            "It was already used, or it is more than 15 minutes old. Ask Claude again for a new one."]),
+            status_code=404)
+
+    def link_site(link):
+        try:
+            return site_label(store.get(link["connector_id"]).target)
+        except (FileNotFoundError, ValueError):
+            return "the site"
+
+    @app.get("/signin/{token}")
+    async def sign_in_page(token: str):
+        link = links.get(token, "sign_in")
+        if link is None:
+            return expired_page()
+        if link["state"] != "new":
+            return RedirectResponse(f"/signin/{token}/status", status_code=303)
+        site = link_site(link)
+        return HTMLResponse(page(f"Sign in to {site}", [
+            f"Seira needs you to sign in to {site} again. A browser window will open on this computer; "
+            "sign in there the way you normally do.",
+            "Seira never sees your password."], form=[(f"/signin/{token}/start", "Open the sign-in window")]))
+
+    @app.post("/signin/{token}/start")
+    async def sign_in_start(token: str):
+        link = links.get(token, "sign_in")
+        if link is None:
+            return expired_page()
+        if link["state"] == "new" and link["connector_id"] not in signing_in:
+            links.mark(token, "started")
+            link["progress"], link["expires"] = "opening", time.time() + SIGN_IN_WAIT + 300
+            task = asyncio.create_task(run_sign_in(link["connector_id"], link))
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+        return RedirectResponse(f"/signin/{token}/status", status_code=303)
+
+    @app.get("/signin/{token}/status")
+    async def sign_in_status(token: str):
+        link = links.get(token, "sign_in")
+        if link is None:
+            return expired_page()
+        site = link_site(link)
+        progress = link.get("progress", "opening")
+        title, text, refresh = {
+            "opening": ("Opening the sign-in window", "One moment.", 2),
+            "waiting": (f"Sign in to {site}", f"A browser window is open on this computer. Sign in to {site} "
+                        "there. This page updates by itself.", 3),
+            "signed_in": ("You're signed in", "Go back to Claude and ask again.", None),
+            "not_verified": ("Seira couldn't confirm the sign-in", "Ask Claude again for a new link and sign in "
+                             "once more.", None),
+            "failed": ("The sign-in didn't finish", "Ask Claude again for a new link.", None),
+        }.get(progress, ("Signing in", "One moment.", 2))
+        return HTMLResponse(page(title, [text], refresh=refresh))
+
+    @app.get("/approve/{token}")
+    async def approval_page(token: str):
+        link = links.get(token, "approval")
+        if link is None:
+            return expired_page()
+        preview = link["preview"]
+        if link["state"] != "new":
+            done = {"approved": "Approved. Go back to Claude and ask again.", "declined": "Not deleted.",
+                    "used": "Done."}.get(link["state"], "Done.")
+            return HTMLResponse(page("Delete request", [done]))
+        return HTMLResponse(page(f"Delete this {preview['thing']}?", [
+            f"Claude asked Seira to delete the {preview['thing']}{preview['id_note']} on {preview['site']}. "
+            "This can't be undone."],
+            form=[(f"/approve/{token}/yes", "Delete it"), (f"/approve/{token}/no", "Don't delete")]))
+
+    @app.post("/approve/{token}/{answer}")
+    async def approval_answer(token: str, answer: str):
+        link = links.get(token, "approval")
+        if link is None:
+            return expired_page()
+        if link["state"] == "new" and answer in ("yes", "no"):
+            links.mark(token, "approved" if answer == "yes" else "declined")
+        return RedirectResponse(f"/approve/{token}", status_code=303)
 
     async def run_daily_check():
         return await daily_check(store.list(), runtime_for, busy=lambda cid: cid in compile_jobs, write=store.write,
@@ -474,7 +609,7 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
     gateway = build_gateway(registry=registry, runtime_for=runtime_for, compile_jobs=compile_jobs, jobs=jobs,
                             start_build=start_site_build, start_compilation=start_compilation,
                             cancel_job=request_cancel, persist=store.write, audit=audit, errors=errors,
-                            start_repair=start_repair,
+                            start_repair=start_repair, links=links, signing_in=signing_in,
                             users=users, home=store.home,
                             model_available=lambda: bool(model_settings().get("available")))
     manager = mount_gateway(app, gateway, json_response=mcp_json_response, users=users)

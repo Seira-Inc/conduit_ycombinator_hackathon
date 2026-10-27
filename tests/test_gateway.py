@@ -4,6 +4,7 @@ import os
 import re
 import time
 
+from fastapi.testclient import TestClient
 from mcp import types
 from mcp.shared.memory import create_connected_server_and_client_session
 from test_compiler import family_for
@@ -19,6 +20,8 @@ REFERENCE = re.compile(r"Reference ([A-Z2-7]{8})\.")
 
 READ = public_name("demo-1", "records_read")
 DELETE = public_name("demo-1", "records_delete")
+
+SIGN = r"http://127\.0\.0\.1:4455/signin/[A-Za-z0-9_-]{22}"
 
 
 def receipt(name, arguments):
@@ -160,7 +163,8 @@ async def test_seira_build_refuses_duplicates_and_asks_for_login(app, monkeypatc
                                                           "request": "add a widget"})).structuredContent
     assert exists["status"] == "exists" and exists["tool"] == READ
     assert login["status"] == "sign_in_required"
-    assert login["message"] == "You're signed out of nosession.example. Sign in here, then ask again: http://127.0.0.1:4455/"
+    assert re.fullmatch(r"You're signed out of nosession\.example\. Sign in here, then ask again: http://127\.0\.0\.1:4455/signin/[A-Za-z0-9_-]{22}",
+                        login["message"])
     assert not app.state.jobs
 
 
@@ -214,7 +218,7 @@ async def test_delete_asks_the_user_through_elicitation_and_logs_the_answer(app,
     assert "r1" not in json.dumps(rows) and rows[0]["user"] == "local"
 
 
-async def test_delete_without_elicitation_needs_a_one_use_confirm_token(app, monkeypatch):
+async def test_delete_without_elicitation_runs_only_after_the_person_approves_the_link(app, monkeypatch):
     calls = []
 
     async def fake_call(self, name, arguments, progress=None):
@@ -222,19 +226,28 @@ async def test_delete_without_elicitation_needs_a_one_use_confirm_token(app, mon
         return receipt(name, arguments)
 
     monkeypatch.setattr("conduit.runtime.Runtime.call", fake_call)
-    async with create_connected_server_and_client_session(app.state.gateway) as session:
-        listed = {t.name: t for t in (await session.list_tools()).tools}
-        first = (await session.call_tool(DELETE, {"id": "r1"})).content[0].text
-        assert first.startswith("Show the user what will be deleted: the record (ID r1) on example.com.")
-        token = re.search(r'confirm_token "([^"]+)"', first).group(1)
-        wrong = (await session.call_tool(DELETE, {"id": "r9", "confirm_token": token})).content[0].text
-        done = await session.call_tool(DELETE, {"id": "r1", "confirm_token": token})
-        reused = (await session.call_tool(DELETE, {"id": "r1", "confirm_token": token})).content[0].text
-    assert "confirm_token" in listed[DELETE].inputSchema["properties"]
-    assert "confirm_token" not in listed[READ].inputSchema["properties"]
-    assert wrong.startswith("That confirmation has expired") and reused.startswith("That confirmation has expired")
+    with TestClient(app) as web:
+        async with create_connected_server_and_client_session(app.state.gateway) as session:
+            listed = {t.name: t for t in (await session.list_tools()).tools}
+            first = (await session.call_tool(DELETE, {"id": "r1"})).content[0].text
+            match = re.fullmatch(r"Approve deleting the record \(ID r1\) on example\.com here: "
+                                 r"http://127\.0\.0\.1:4455(/approve/[A-Za-z0-9_-]{22}) Once it's approved, ask me again\.",
+                                 first)
+            path = match.group(1)
+            page = web.get(path)
+            assert page.status_code == 200 and "Delete this record?" in page.text and "(ID r1)" in page.text
+            still_waiting = (await session.call_tool(DELETE, {"id": "r1"})).content[0].text
+            assert still_waiting == first and calls == []
+            assert web.post(path + "/yes", follow_redirects=False).status_code == 303
+            other = (await session.call_tool(DELETE, {"id": "r9"})).content[0].text
+            done = await session.call_tool(DELETE, {"id": "r1"})
+            again = (await session.call_tool(DELETE, {"id": "r1"})).content[0].text
+            assert web.post(path + "/yes").status_code == 200
+    assert "confirm_token" not in listed[DELETE].inputSchema.get("properties", {})
+    assert other.startswith("Approve deleting the record (ID r9)")
     assert not done.isError and calls == [{"id": "r1"}]
-    assert app.state.audit.tail()[-1]["approval"] == "confirm_token"
+    assert again.startswith("Approve deleting the record (ID r1)") and calls == [{"id": "r1"}]
+    assert app.state.audit.tail()[-1]["approval"] == "approval_link"
 
 
 async def test_seira_build_needs_a_model(app, monkeypatch):

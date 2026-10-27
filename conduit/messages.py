@@ -43,9 +43,8 @@ TEMPLATES = {
                                "try again in a few minutes. Reference {ref}.",
     "unavailable": "{Verbing} {things} on {site} isn't available right now. Your administrator can see why. "
                    "Reference {ref}.",
-    "confirm_with_token": "Show the user what will be deleted: the {thing}{id_note} on {site}. If they agree, "
-                          "call this tool again with the same arguments and confirm_token \"{token}\".",
-    "confirmation_expired": "That confirmation has expired or doesn't match this request. Ask again for a new one.",
+    "approval_required": "Approve deleting the {thing}{id_note} on {site} here: {link} Once it's approved, "
+                         "ask me again.",
     "not_approved": "The delete wasn't approved, so nothing was changed.",
     "build_unavailable": "Seira can't build new tools right now. Your administrator can see why.",
     "unknown_tool": "That tool isn't available. Use seira_find to see what is.",

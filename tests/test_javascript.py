@@ -103,7 +103,7 @@ async def test_javascript_compilation_gate_and_actual_mcp(tmp_path, monkeypatch,
             assert all(c["metrics"]["model_calls"] == c["metrics"]["screenshots"] == 0
                        for c in report["mcp_test"]["calls"])
             if canvas:
-                runtime.acquire_browser()
+                await runtime.acquire_browser()
                 await runtime.browser.start()
                 assert await runtime.browser.page.evaluate("JSON.parse(localStorage.getItem('drawing')).elements") == []
             else:
