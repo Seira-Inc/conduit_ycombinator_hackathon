@@ -12,6 +12,54 @@ problems as `docs/research/problems_encountered.md`. The design this repo builds
 `docs/SYSTEM_DESIGN.md` (exported from the live Claude Doc, which also holds the two drawings and
 the comment threads).
 
+## 2026-10-27 — Seira checks the sign-in itself before it spends anything
+
+**Why.** Iminabo's live test of Forms ended in a paid build learning on Microsoft's sign-in page.
+Seira checked the sign-in at three points (daily, before a build, after a failure), and each one
+missed or went unused (see `problems_encountered.md`, 2026-10-27). He asked for a check on every
+cold start, made a default for every website, with sites that have no sign-in counting as signed
+in. Decision: Seira runs it itself rather than giving the agent a tool to call, since an agent can
+skip a call and one tool per site would double the tool list.
+
+**What changed.**
+- `BrowserSession.check_sign_in` opens the start page and watches it settle (15 s for a site that
+  has asked for a sign-in, 3 s for one that never has). It answers signed in, signed out or unsure.
+  A "Sign in" button counts only once it has stayed 3 s; single-page apps flash one while loading.
+- The signed-in and signed-out start pages come from the last verified sign-in: every
+  `login_check` now records when it happened, and its before and after pages become markers when
+  they are different pages.
+- `Runtime.check_sign_in` keeps the answer 30 minutes, drops it when the session file changes, and
+  every call updates it. The gateway uses it before running a tool (signed out: the link, nothing
+  runs), in `seira_find`, before `seira_build` (signed out or unsure: the link, no job), and before
+  withdrawing a tool. The compiler's pre-model gate and the daily check use the same check.
+- The sign-in link and dashboard sign-in confirm sites with no sign-out button.
+- Claude is told not to show job numbers to the user.
+
+**Then the live sign-in, four attempts.** Each failure is in `problems_encountered.md`:
+- The link page's button was refused: under `Referrer-Policy: no-referrer` a browser sends
+  `Origin: null` with a form's POST. The link pages now use `same-origin`.
+- Seira twice decided the sign-in had finished while Forms was still loading and closed the window
+  early. Guessing from the page was dropped as the way to finish: the person now presses
+  "I've signed in" (as `conduit login` asked for Enter on 2026-10-18), and the window closes only
+  after the cookies it saved open the site signed in, in a separate hidden browser.
+- The window then vanished by itself right after Microsoft sent the person back to Forms. A new
+  local record (`<home>/signin.jsonl`: steps and pages by site and path, never values) showed the
+  sign-in had worked; the installed Edge closed the window. Research had already found this ("Use
+  Chrome, not Edge"; the 2026-10-18 sign-in ran with `--channel chrome`). Sign-in windows now open
+  in Chrome, then Playwright's Chromium, Edge last.
+- With that, the sign-in and the call went through: Seira created the form "Seira test".
+
+**For later.** `come_back_to.md` is new: things that work today but need a proper answer, starting
+with which browser a person can sign in with on a machine without Chrome.
+
+**Tests.** Fast suite 237 passed, 1 skipped (was 216); `tests/test_sign_in_check.py` covers each
+judgement, the cache, the gateway answers, the browser chosen for a sign-in and a real browser on a
+Forms-like loading page; `tests/test_links.py` presses the link buttons in a real browser, keeps
+the window open until the saved cookies work, and takes the person's "I've signed in".
+Integration 91 passed, 4 failed: the four already fixed on `fix/failed-family-not-ready` and
+`fix/operation-import-hub-tools`, failing the same way, not yet merged here. Against the real Forms
+with the expired session the check answers signed out in about 5 s.
+
 ## Standing decisions
 
 The thirteen research decisions carry over (`docs/research/journal.md`, "Standing decisions from

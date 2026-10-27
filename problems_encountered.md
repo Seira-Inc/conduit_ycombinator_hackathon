@@ -11,6 +11,68 @@ full account of each is in `docs/research/problems_encountered.md`.
 
 ## 2026-10-27
 
+- **[resolved] A build on a signed-out Microsoft Forms spent 3 model passes.** Asked to create a
+  form, Claude found the `forms` tools hidden and queued a build; it learned on Microsoft's sign-in
+  page until Iminabo cancelled it. Three causes. (1) The Forms tools were hidden again: the old
+  gateway, still running with its own copy of the connector, wrote it back over the hand repair at
+  the 07:00 daily check. (2) The pre-build check looked once, before the page settled: Forms first
+  paints its own page, checks the sign-in in a hidden frame, and only then shows its public landing
+  page with a "Sign in" button. No password field, no redirect, so nothing fired. (3) The 07:00
+  daily check had found Forms signed out, and nothing used that. Fixed: one sign-in check
+  (`BrowserSession.check_sign_in`) watches the start page settle for up to 15 s and also reads a
+  "Sign in" button that stays, plus the start page as the last sign-in saw it signed out and signed
+  in. It runs on first use after a start, before every build or repair, and before a tool is
+  withdrawn; its answer is kept 30 minutes and used by calls, `seira_find` and `seira_build`. Run
+  against the real Forms with the expired session it answers signed out in about 5 s. The Forms
+  tools were restored again with the gateway stopped (backup `connector.before-undegrade-2.json`).
+
+- **[resolved] The Forms sign-in window vanished about a second after the sign-in (10:29, 10:43,
+  10:44).** The sign-in record (`signin.jsonl`) showed one tab going forms.cloud.microsoft/ ->
+  login.microsoftonline.com authorize -> back to /Pages/DesignPagev2.aspx, signed in, and then the
+  browser gone while that page loaded. Cause, already known in research (problems log, "Use Chrome,
+  not Edge"): the sign-in window opened in the installed Edge, whose signed-in profile takes over a
+  Microsoft sign-in and closes the window it came from; the 2026-10-18 sign-in that worked ran with
+  `--channel chrome`, and the link flow never carried that over. Fixed: a person's sign-in window
+  opens in Chrome, then Playwright's Chromium, and Edge only if neither exists
+  (`CONDUIT_BROWSER_CHANNEL` still overrides); the session it saves works in headless Edge, as on
+  2026-10-18. Changes: the person now says when they are done
+  ("I've signed in" on the link page, as `conduit login` asked for Enter on 2026-10-18); the window
+  closes only after the saved cookies open the site signed in in a separate browser; a window that
+  vanishes by itself is named as such; and `<home>/signin.jsonl` records each sign-in's steps and
+  the pages the window went through (site, path and title only), so the next attempt shows the cause.
+
+- **[resolved] The sign-in window still closed while Forms was loading (10:20).** Judging from
+  the page when a sign-in has finished failed twice; the saved session was tested only after the
+  window had closed. Fixed for every site: when the window looks signed in, Seira saves its cookies
+  so far, opens the site with only those in a separate hidden browser, and closes the window only
+  when that browser lands signed in; otherwise the window stays open and Seira tries again 5 s
+  later. The status page says "Leave the sign-in window open" meanwhile.
+
+- **[resolved] The sign-in link said "You're signed in" when Forms was not.** The first live link
+  sign-in (10:07) was confirmed by the rule "went through Microsoft and came back with no sign-in
+  prompt", but the page it came back to, and the page the check then reopened, was Forms' public
+  landing page while it was still loading, before its "Sign in" button appeared. The window most
+  likely closed in the middle of the sign-in, so the saved session was never signed in, and the
+  next call said signed out again. The bad record (same page before and after) also hid the
+  signed-in and signed-out pages learned on 2026-10-18. Fixed: the window waits for the known
+  signed-in page, or for a page that stays 5 s with no sign-in prompt and is neither the page the
+  window opened on nor the known signed-out page; the check after the window closes uses the
+  settled sign-in check and never accepts the page the sign-in began on; markers come from the
+  newest verified sign-in whose pages differ; the status page says "Checking the sign-in" meanwhile.
+
+- **[resolved] The sign-in link's button answered "This action must originate from the local
+  Conduit dashboard."** Every Seira page sent `Referrer-Policy: no-referrer`, and under that policy
+  a browser sends `Origin: null` with a form's POST, which the forged-request check refuses. The
+  test client sends no Origin at all, so the tests passed. Fixed: the link pages use `same-origin`,
+  a refused link POST shows a plain page instead of JSON, and
+  `test_links.py::test_the_link_buttons_work_in_a_real_browser` presses both buttons in a real
+  browser (it fails with the old header).
+
+- **[resolved] The sign-in link could never confirm a Forms sign-in.** It waited for a sign-out
+  control or a password form that disappears; Forms shows neither (the password is typed on
+  Microsoft's site). A sign-in now also counts once the person went through a sign-in page or
+  another site and is back on the site with no sign-in prompt.
+
 - **[resolved] An expired Microsoft sign-in became a paid repair and a raw error.** Forms
   redirected to `login.microsoftonline.com`, not in the connector's allowed or login origins, so
   the browser aborted the redirect; the JavaScript program found no user info and failed
