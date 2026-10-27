@@ -12,13 +12,15 @@ Seira's just-in-time tool engine. Point it at a website you are signed in to; it
 
 ## Setup
 
-Python 3.11 or newer.
+Python 3.11 or newer; the repo pins 3.14 (`.python-version`). On Windows, build the venv from the python.org install, not a Python uv downloads:
 
 ```bash
-uv venv && uv pip install -e ".[dev]"
+uv venv --python-preference only-system && uv pip install -e ".[dev]"
 python -m playwright install chromium
 cp .env.example .env
 ```
+
+Then activate the venv and use `python` as usual (`.venv\Scripts\activate`, then `python -m conduit ...`). Why the flag: Windows 11's Smart App Control blocks unsigned programs, and a venv made from a uv-downloaded Python gets an unsigned `python.exe` launcher. A venv made from the python.org install gets that install's signed launcher.
 
 Fill `.env` with your own keys. It is ignored by git, as are `.conduit/` (connectors and encrypted sessions) and `artifacts/`.
 

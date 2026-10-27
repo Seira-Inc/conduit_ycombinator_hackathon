@@ -33,6 +33,17 @@ Iminabo"). Iminabo amended and extended them on 2026-10-18, in `docs/SYSTEM_DESI
 6. **Tier 0 runs local-only first.** No tunnel, no VPS: gateway and runtime on one machine until
    the loop works end to end. Customer zero is Iminabo until the others are free.
 
+## 2026-10-19 — the venv moves to Python 3.14 so `python` runs again
+
+Smart App Control started blocking the uv-built venv's unsigned `python.exe` (see
+`problems_encountered.md`). Iminabo wants plain `python script.py` in an activated venv, as with
+pip. The venv is rebuilt with uv from the python.org Python 3.14.6, whose launcher is signed;
+`.python-version` is 3.14, `requirements.lock` regenerated (the fresh install moved certifi,
+fastapi, starlette, httpx2 and httpcore2 up a minor or patch version). Fast suite 192 passed,
+1 skipped; the real-browser session test passes. The model for builds is now configured in
+`.env` (backend `anthropic`, model `claude-opus-5`, the default in `conduit/agent.py`), so
+`seira_build` can run.
+
 ## 2026-10-18 — Tier 0 finished: steps 2 to 5
 
 Iminabo's call after the hackathon: finish Tier 0 well before moving to Tier 1, since everything

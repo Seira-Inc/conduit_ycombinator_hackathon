@@ -9,6 +9,24 @@ Dates are local (America/Chicago).
 Items with no single discovery date live under **Carried over from research** at the bottom; the
 full account of each is in `docs/research/problems_encountered.md`.
 
+## 2026-10-19
+
+- **[resolved] Windows blocked the venv's Python: "An Application Control policy has blocked this
+  file".** Smart App Control is on (it reads 1 in `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`,
+  `VerifiedAndReputablePolicyState`); it ran the venv on Oct 18 and blocked it on Oct 19, most
+  likely the switch from evaluation to enforcement. It refuses unsigned programs without a
+  reputation. The venv was made from uv's downloaded CPython 3.12, which ships no signed launcher,
+  so uv wrote its own unsigned `python.exe`. Fixed by rebuilding the venv from the python.org
+  Python 3.14 (`uv venv --python-preference only-system`), whose launcher is signed by the Python
+  Software Foundation; `.python-version` is now 3.14 and `requirements.lock` was regenerated.
+  Smart App Control stays on: once off, it cannot be turned back on without resetting Windows.
+
+- **[note] Smart App Control can block a compiled extension the first time it loads.** On the
+  rebuilt venv the first `import jsonschema` failed on `rpds` (a Rust `.pyd`) with the same
+  message; a minute later every one of the venv's 44 compiled modules loaded, and the fast suite
+  passed (192 passed, 1 skipped). If an import fails with that message right after an install,
+  run it again before changing anything.
+
 ## 2026-10-18 (finishing Tier 0)
 
 - **[resolved] `browser_close` saved state before releasing, so signed-out cookies could overwrite a
