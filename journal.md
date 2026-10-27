@@ -12,6 +12,14 @@ problems as `docs/research/problems_encountered.md`. The design this repo builds
 `docs/SYSTEM_DESIGN.md` (exported from the live Claude Doc, which also holds the two drawings and
 the comment threads).
 
+## 2026-10-27 — The two test fixes merged; the live delete works
+
+Iminabo's live delete of the "Seira test" form worked, approval included. The two fix branches are
+merged into `imi` and `main`: `fix/failed-family-not-ready` (a resource that failed every check now
+stays `incomplete` instead of `partial`, and the document no-effect test presses Enter instead of
+Esc) and `fix/operation-import-hub-tools` (the hub import test expects the gateway's `seira_*`
+tools). They cleared the four known integration failures; details in `problems_encountered.md`.
+
 ## 2026-10-27 — Seira checks the sign-in itself before it spends anything
 
 **Why.** Iminabo's live test of Forms ended in a paid build learning on Microsoft's sign-in page.

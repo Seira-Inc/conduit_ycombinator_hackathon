@@ -37,7 +37,3 @@ When an item is dealt with, move what was decided into the journal and delete it
   running while `connector.json` was repaired by hand wrote its in-memory copy back at the 07:00
   daily check and undid the repair. Hand repairs need the gateway stopped, or the store should
   refuse a write over a file changed since it was read.
-
-- **Two fix branches not yet merged:** `fix/failed-family-not-ready` (a failed resource counted as
-  ready; an out-of-date document test) and `fix/operation-import-hub-tools` (the hub import test).
-  Until they are merged, the integration suite shows those four known failures.
