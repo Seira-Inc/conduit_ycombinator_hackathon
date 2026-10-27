@@ -86,8 +86,9 @@ async def test_failed_document_navigation_is_reconciled_by_fresh_full_export(tmp
                             allowed_origins=[url], allow_private=True)
         runtime = Runtime(manifest, tmp_path)
         source = recipe()
+        # Enter, not a focus key like Escape: the failure must follow a step that could have committed.
         source["replacement"]["steps"][:0] = [
-            {"kind": "press", "locator": {"css": "body"}, "value": "Escape"},
+            {"kind": "press", "locator": {"css": "body"}, "value": "Enter"},
             {"kind": "assert", "value": False}]
         try:
             await runtime.acquire_browser()

@@ -284,9 +284,11 @@ def publish(manifest, family, report):
         return
     manifest.tools = [t for t in manifest.tools if not (t.resource == family.name and t.adapter == "program")]
     manifest.capabilities = [c for c in manifest.capabilities if c.get("resource") != family.name]
-    complete = all(report["operations"].get(verb) for verb in VERBS)
+    # Only a lifecycle that passed can be partial. A failed one stays incomplete: counting it as
+    # partial would report a resource delivered when nothing was verified or published.
+    partial = report["status"] == "ready" and not all(report["operations"].get(verb) for verb in VERBS)
     manifest.capabilities.append({**report, "label": family.label, "mode": family.mode, "adapter_version": version,
-                                  **({} if complete else {"status": "partial", "coverage": "partial"})})
+                                  **({"status": "partial", "coverage": "partial"} if partial else {})})
     if report["status"] != "ready":
         return
     config = {"family": family.model_dump(), "fingerprint": fingerprint(family)}
