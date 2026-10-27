@@ -100,15 +100,28 @@ full account of each is in `docs/research/problems_encountered.md`.
   so blocks, delete approval, withdrawn tools, the audit log and the new messages did not apply.
   It is now a stdio bridge to `/mcp`.
 
-- **[OPEN] Two write-grounding tests fail: a learned program that writes to a path never observed
-  on the site is accepted.** `test_write_grounding.py::test_steps_create_to_an_unobserved_path_is_rejected_before_it_is_sent`
-  and `::test_javascript_create_to_an_unobserved_path_is_blocked_by_the_runtime_backstop` end
-  `ready` instead of `incomplete`. They fail the same way on `6c6af50`, before today's changes;
-  never run in this repo until today. This is the guard that keeps an invented write endpoint off
-  a real account, so it needs its own investigation.
+- **[resolved] A resource that failed every check was reported `ready`.** Found by two
+  write-grounding tests (`test_write_grounding.py::test_steps_create_to_an_unobserved_path_is_rejected_before_it_is_sent`
+  and `::test_javascript_create_to_an_unobserved_path_is_blocked_by_the_runtime_backstop`), which
+  ended `ready` instead of `incomplete`. The grounding guard was never broken: the invented create
+  was stopped with `ungrounded_write` before it left, the site saw 0 writes, and no tool was
+  published. The bug was in `publish()` (`conduit/compiler.py`): since research commit `242b896`
+  (Oct 3, "Publish the operations a resource proved"), any capability missing a verb was marked
+  `partial`, including one whose verification failed outright, and the compile counts `partial`
+  as delivered. So a failed first attempt at a resource made the run `ready`, and the gateway's
+  `conduit://capabilities` listed it as ready with no actions. The tests last passed between
+  `4b0bb4f` (Oct 3, where they were added) and `242b896`; this repo was seeded after, so they
+  failed from the start. Fixed: only a lifecycle that passed can be `partial`; a failed one stays
+  `incomplete`. Side note: the check at proposal time (`check_evidence`) reads only absolute URLs,
+  and programs use site-relative ones, so in practice the runtime check is what stops these writes.
 
-- **[OPEN] `test_document_compiler.py::test_failed_document_navigation_is_reconciled_by_fresh_full_export`
-  fails** (`KeyError: 'creation_no_effect_confirmed'`), also on `6c6af50`.
+- **[resolved] `test_document_compiler.py::test_failed_document_navigation_is_reconciled_by_fresh_full_export`
+  failed** (`KeyError: 'creation_no_effect_confirmed'`). The test was out of date, not the code.
+  It needs a step that might have saved something before the failure, so the verifier takes a
+  fresh export to prove nothing changed. It used a press of the Esc key, and since research commit
+  `7c5f015` (Oct 3) Esc, Tab and the arrow keys only move focus and no longer count as possible
+  writes. The failure was then certain, and the export check never ran. The test now presses
+  Enter.
 
 - **[note] Server-side redirects never reach Playwright's route handler**, so a 302 to a login page
   is caught from the response event instead; confirmed by the `/offsite` and `/protected` routes in
