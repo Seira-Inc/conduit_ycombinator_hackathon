@@ -11,6 +11,16 @@ full account of each is in `docs/research/problems_encountered.md`.
 
 ## 2026-10-27
 
+- **[resolved] `test_operation_import.py::test_imported_operation_portable_and_universal_mcp`
+  listed 6 tools through the hub instead of 1.** The test was out of date; the code was right. Since
+  `01180d4` the hub forwards the gateway's `/mcp` listing, which adds `seira_find`,
+  `seira_build` and `seira_status` for every client, plus `seira_block` and `seira_unblock` for
+  an admin. The local user with no `users.json` is an admin. That commit updated
+  `test_compiled_mcp.py` for the hub but not this test. The test now ignores `seira_*` tools when
+  it checks that the import gives exactly one tool. Through the hub it also expects what the
+  gateway shows clients: receipts have no `metrics`, and the capabilities resource lists the
+  allowed actions (`["update"]`) instead of a `partial` status.
+
 - **[resolved] An expired Microsoft sign-in became a paid repair and a raw error.** Forms
   redirected to `login.microsoftonline.com`, not in the connector's allowed or login origins, so
   the browser aborted the redirect; the JavaScript program found no user info and failed

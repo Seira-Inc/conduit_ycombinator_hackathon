@@ -75,11 +75,12 @@ async def test_imported_operation_portable_and_universal_mcp(tmp_path):
         assert (home / "auth" / (imported.id + ".session")).read_bytes() == saved_auth
         env = {**os.environ, "CONDUIT_HOME": str(home), "CONDUIT_LEARNING_DISABLED": "1"}
 
-        async def exercise(params, title):
+        async def exercise(params, title, hub=False):
             async with stdio_client(params) as (reader, writer):
                 async with ClientSession(reader, writer) as client:
                     await client.initialize()
-                    tools = (await client.list_tools()).tools
+                    # The hub forwards the gateway's listing, which adds its own seira_* tools.
+                    tools = [t for t in (await client.list_tools()).tools if not t.name.startswith("seira_")]
                     assert len(tools) == 1 and tools[0].name.endswith("rename_record")
                     tool = tools[0]
                     assert tool.outputSchema
@@ -87,7 +88,10 @@ async def test_imported_operation_portable_and_universal_mcp(tmp_path):
                     first = await client.call_tool(tool.name, {"id": item["id"], "title": title})
                     assert not first.isError, first.content
                     receipt = first.structuredContent
-                    assert receipt["metrics"]["model_calls"] == receipt["metrics"]["screenshots"] == 0
+                    if hub:
+                        assert "metrics" not in receipt
+                    else:
+                        assert receipt["metrics"]["model_calls"] == receipt["metrics"]["screenshots"] == 0
                     assert receipt["data"] == state["items"]["tester"][item["id"]]
                     assert receipt["data"]["title"] == title and receipt["data"]["note"] == "Keep"
                     second = await client.call_tool(tool.name, {"id": item["id"], "title": title + " 2",
@@ -99,13 +103,16 @@ async def test_imported_operation_portable_and_universal_mcp(tmp_path):
                     assert stale.isError and state["writes"] == before
                     assert state["items"]["tester"][control["id"]] == control["data"]
                     coverage = await client.read_resource("conduit://capabilities")
-                    assert '"partial"' in coverage.contents[0].text
+                    if hub:
+                        assert [row["actions"] for row in json.loads(coverage.contents[0].text)] == [["update"]]
+                    else:
+                        assert '"partial"' in coverage.contents[0].text
         try:
             await exercise(StdioServerParameters(command=sys.executable,
                 args=[str(exported / "server.py")], cwd=str(exported), env=env), "Portable Ω")
             async with dashboard(home) as dashboard_url:
                 await exercise(StdioServerParameters(command=sys.executable,
-                    args=["-m", "conduit", "--home", str(home), "hub", "--url", dashboard_url], env=env), "Universal Ω")
+                    args=["-m", "conduit", "--home", str(home), "hub", "--url", dashboard_url], env=env), "Universal Ω", hub=True)
         finally:
             # The fixture rotates CSRF during the imported connector's mutations.
             # Cleanup must use its latest saved session, not the pre-import copy.
