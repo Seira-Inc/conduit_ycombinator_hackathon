@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 
 from mcp import types
@@ -13,7 +14,8 @@ from conduit.compiler import publish
 from conduit.models import Manifest
 from conduit.programs import ProgramError
 from conduit.registry import public_name
-from conduit.tool_results import error_payload
+
+REFERENCE = re.compile(r"Reference ([A-Z2-7]{8})\.")
 
 READ = public_name("demo-1", "records_read")
 DELETE = public_name("demo-1", "records_delete")
@@ -36,14 +38,18 @@ async def test_lists_only_verified_tools_with_honest_hints(app):
     read, delete = listed[READ], listed[public_name("demo-1", "records_delete")]
     assert read.annotations.readOnlyHint and not read.annotations.destructiveHint
     assert delete.annotations.destructiveHint and not delete.annotations.readOnlyHint
-    assert read.description.startswith("Demo (example.com):")
+    assert read.description == "example.com: read a record by its ID."
+    assert delete.description == "example.com: delete a record. The user approves each delete."
+    assert "metrics" not in read.outputSchema["properties"] and "metrics" not in read.outputSchema["required"]
 
 
 async def test_instructions_and_resources_never_contain_notes(app):
     assert "SECRET-NOTE" not in app.state.gateway.instructions
     async with create_connected_server_and_client_session(app.state.gateway) as session:
         text = (await session.read_resource("conduit://capabilities")).contents[0].text
-    assert "SECRET-NOTE" not in text and json.loads(text)[0]["resource"] == "records"
+    assert "SECRET-NOTE" not in text
+    assert json.loads(text) == [{"site": "example.com", "what": "records",
+                                 "actions": ["create", "read", "update", "delete"], "status": "ready"}]
 
 
 async def test_call_returns_the_runtime_receipt(app, monkeypatch):
@@ -58,12 +64,12 @@ async def test_call_returns_the_runtime_receipt(app, monkeypatch):
         result = await session.call_tool(READ, {"id": "r1"})
     assert not result.isError and seen == {"connector": "demo-1", "name": "records_read"}
     assert result.structuredContent["id"] == "r1" and result.structuredContent["status"] == "verified"
+    assert not {"metrics", "adapter_version", "reconciled"} & set(result.structuredContent)
 
 
-async def test_program_error_matches_the_shared_payload(app, monkeypatch):
-    exc = ProgramError("postcondition_failed", "The record did not settle", uncertain=True)
+async def test_an_uncertain_write_says_dont_repeat_and_keeps_the_detail_local(app, monkeypatch):
+    exc = ProgramError("postcondition_failed", "The record did not settle at https://example.com/x", uncertain=True)
     exc.object_id = "r1"
-    exc.postcondition = {"field": "title"}
 
     async def fail(self, name, arguments, progress=None):
         raise exc
@@ -71,7 +77,14 @@ async def test_program_error_matches_the_shared_payload(app, monkeypatch):
     monkeypatch.setattr("conduit.runtime.Runtime.call", fail)
     async with create_connected_server_and_client_session(app.state.gateway) as session:
         result = await session.call_tool(public_name("demo-1", "records_create"), {"title": "x"})
-    assert result.isError and json.loads(result.content[0].text) == error_payload(exc)
+    text = result.content[0].text
+    assert result.isError and text.startswith(
+        "Seira couldn't confirm whether the record was created (ID r1). Don't repeat it; read it first to check.")
+    ref = REFERENCE.search(text).group(1)
+    assert "settle" not in text and "postcondition" not in text
+    detail = app.state.errors.find(ref)
+    assert detail["code"] == "postcondition_failed" and "<url>" in detail["message"]
+    assert app.state.audit.tail()[-1]["ref"] == ref
 
 
 async def test_unknown_and_busy_tools_are_refused(app, monkeypatch):
@@ -81,20 +94,20 @@ async def test_unknown_and_busy_tools_are_refused(app, monkeypatch):
     monkeypatch.setattr("conduit.runtime.Runtime.call", never)
     async with create_connected_server_and_client_session(app.state.gateway) as session:
         unknown = await session.call_tool("deadbeef__records_read", {})
-        assert unknown.isError and "Unknown or unverified" in unknown.content[0].text
+        assert unknown.isError and unknown.content[0].text == "That tool isn't available. Use seira_find to see what is."
         app.state.compile_jobs["demo-1"] = "job-1"
         busy = await session.call_tool(READ, {"id": "r1"})
-    assert busy.isError and json.loads(busy.content[0].text)["code"] == "connector_busy"
+    assert busy.isError and busy.content[0].text == "Seira is busy with example.com right now. Try again in a minute."
 
 
 async def test_meta_tools_find_and_status(app):
     async with create_connected_server_and_client_session(app.state.gateway) as session:
         found = (await session.call_tool("seira_find", {"request": "get a record on example.com"})).structuredContent
         none = (await session.call_tool("seira_find", {"request": "book a flight"})).structuredContent
-        status = (await session.call_tool("seira_status", {"job_id": "nope"})).structuredContent
-    assert found["status"] == "found" and found["tool"] == READ
-    assert none["status"] == "none" and none["known_sites"] == ["https://example.com"]
-    assert status["status"] == "unknown"
+        status = (await session.call_tool("seira_status", {"job": "nope"})).structuredContent
+    assert found == {"status": "found", "tool": READ, "site": "example.com", "action": "read", "what": "records"}
+    assert none["status"] == "none" and none["sites"] == ["example.com"] and "seira_build" in none["message"]
+    assert status == {"status": "unknown", "job": "nope", "message": "Seira has no build with that number."}
 
 
 async def test_seira_build_returns_at_once_and_the_job_completes(app, monkeypatch):
@@ -120,15 +133,16 @@ async def test_seira_build_returns_at_once_and_the_job_completes(app, monkeypatc
         queued = (await session.call_tool("seira_build", {"site": "https://newsite.example",
                                                            "request": "add a task on newsite"})).structuredContent
         assert time.perf_counter() - started < 1.0
-        assert queued["status"] == "queued" and queued["login_required"] and queued["eta_seconds"] == 600
+        assert queued["status"] == "queued" and "2 to 20 minutes" in queued["message"]
+        assert set(queued) == {"status", "job", "message"}
         for _ in range(40):
-            report = (await session.call_tool("seira_status", {"job_id": queued["job_id"]})).structuredContent
-            if report["status"] in ("complete", "error"):
+            report = (await session.call_tool("seira_status", {"job": queued["job"]})).structuredContent
+            if report["status"] in ("ready", "failed"):
                 break
             await asyncio.sleep(0.05)
         listed = {t.name for t in (await session.list_tools()).tools}
-    assert report["status"] == "complete", report
-    assert report["connector_id"] == "newsite-1" and public_name("newsite-1", "tasks_create") in report["tools"]
+    assert report["status"] == "ready", report
+    assert public_name("newsite-1", "tasks_create") in report["tools"] and "connector_id" not in report
     assert public_name("newsite-1", "tasks_delete") in listed
     assert calls["brief"] == "add a task on newsite"
     assert app.state.store.get("newsite-1").notes == ""
@@ -145,7 +159,8 @@ async def test_seira_build_refuses_duplicates_and_asks_for_login(app, monkeypatc
         login = (await session.call_tool("seira_build", {"site": "https://nosession.example",
                                                           "request": "add a widget"})).structuredContent
     assert exists["status"] == "exists" and exists["tool"] == READ
-    assert login["status"] == "login_required" and "conduit login nosess-1" in login["next"]
+    assert login["status"] == "sign_in_required"
+    assert login["message"] == "You're signed out of nosession.example. Sign in here, then ask again: http://127.0.0.1:4455/"
     assert not app.state.jobs
 
 
@@ -169,7 +184,9 @@ async def test_runtime_reloads_when_connector_json_changes(app, monkeypatch):
 
 def answering(confirm):
     async def callback(context, params):
-        assert params.mode == "form" and "cannot be undone" in params.message
+        assert params.mode == "form" and params.message in (
+            "Delete the record (ID r1) on example.com? This can't be undone.",
+            "Delete the record (ID r2) on example.com? This can't be undone.")
         return types.ElicitResult(action="accept" if confirm is not None else "decline",
                                   content={"confirm": confirm} if confirm is not None else None)
     return callback
@@ -190,7 +207,7 @@ async def test_delete_asks_the_user_through_elicitation_and_logs_the_answer(app,
                                                            elicitation_callback=answering(None)) as session:
         declined = await session.call_tool(DELETE, {"id": "r2"})
     assert not done.isError and calls == [("records_delete", {"id": "r1"})]
-    assert declined.isError and json.loads(declined.content[0].text)["code"] == "not_confirmed"
+    assert declined.isError and declined.content[0].text == "The delete wasn't approved, so nothing was changed."
     rows = app.state.audit.tail()
     assert [(r["verb"], r["approval"], r["outcome"]) for r in rows] == [
         ("delete", "elicitation", "ok"), ("delete", "elicitation", "not_confirmed")]
@@ -207,16 +224,15 @@ async def test_delete_without_elicitation_needs_a_one_use_confirm_token(app, mon
     monkeypatch.setattr("conduit.runtime.Runtime.call", fake_call)
     async with create_connected_server_and_client_session(app.state.gateway) as session:
         listed = {t.name: t for t in (await session.list_tools()).tools}
-        first = json.loads((await session.call_tool(DELETE, {"id": "r1"})).content[0].text)
-        assert first["code"] == "confirmation_required" and first["preview"]["arguments"] == {"id": "r1"}
-        wrong = json.loads((await session.call_tool(DELETE, {"id": "r9", "confirm_token": first["confirm_token"]}))
-                           .content[0].text)
-        done = await session.call_tool(DELETE, {"id": "r1", "confirm_token": first["confirm_token"]})
-        reused = json.loads((await session.call_tool(DELETE, {"id": "r1", "confirm_token": first["confirm_token"]}))
-                            .content[0].text)
+        first = (await session.call_tool(DELETE, {"id": "r1"})).content[0].text
+        assert first.startswith("Show the user what will be deleted: the record (ID r1) on example.com.")
+        token = re.search(r'confirm_token "([^"]+)"', first).group(1)
+        wrong = (await session.call_tool(DELETE, {"id": "r9", "confirm_token": token})).content[0].text
+        done = await session.call_tool(DELETE, {"id": "r1", "confirm_token": token})
+        reused = (await session.call_tool(DELETE, {"id": "r1", "confirm_token": token})).content[0].text
     assert "confirm_token" in listed[DELETE].inputSchema["properties"]
     assert "confirm_token" not in listed[READ].inputSchema["properties"]
-    assert wrong["code"] == "confirmation_expired" and reused["code"] == "confirmation_expired"
+    assert wrong.startswith("That confirmation has expired") and reused.startswith("That confirmation has expired")
     assert not done.isError and calls == [{"id": "r1"}]
     assert app.state.audit.tail()[-1]["approval"] == "confirm_token"
 
@@ -225,4 +241,5 @@ async def test_seira_build_needs_a_model(app, monkeypatch):
     monkeypatch.setattr("conduit.app.model_settings", lambda: {"available": False})
     async with create_connected_server_and_client_session(app.state.gateway) as session:
         result = await session.call_tool("seira_build", {"site": "https://other.example", "request": "add a thing"})
-    assert result.isError and "No model is configured" in result.content[0].text
+    assert result.isError and result.content[0].text == (
+        "Seira can't build new tools right now. Your administrator can see why.")

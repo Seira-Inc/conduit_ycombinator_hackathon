@@ -74,8 +74,8 @@ async def test_keys_gate_the_endpoint_and_blocks_shape_each_users_catalog(tmp_pa
     assert {"seira_block", "seira_unblock", DELETE} <= admin_tools
     assert blocked["blocks"] == [{"tool": DELETE}] and len(limited["blocks"]) == 2
     assert DELETE not in member_tools and READ in member_tools and "seira_block" not in member_tools
-    assert denied.isError and json.loads(denied.content[0].text)["code"] == "admin_only"
-    assert refused_record.isError and json.loads(refused_record.content[0].text)["code"] == "forbidden"
+    assert denied.isError and denied.content[0].text == "Only an admin can do that."
+    assert refused_record.isError and refused_record.content[0].text == "An admin has blocked this for you."
     assert not allowed.isError
     rows = Store(tmp_path).home.joinpath("audit.jsonl").read_text().splitlines()
     assert [json.loads(r)["user"] for r in rows] == ["holy", "holy", "angel", "angel"]
@@ -95,6 +95,7 @@ async def test_seira_find_asks_the_checker_only_when_the_match_is_undecided(app,
         direct = (await session.call_tool("seira_find", {"request": "read a record on example.com"})).structuredContent
         assert direct["status"] == "found" and direct["tool"] == READ and asked == []
         chosen = (await session.call_tool("seira_find", {"request": "look up the firm Acme on example.com"})).structuredContent
-    assert chosen["status"] == "found" and chosen["tool"] == public_name("hub-2", "companies_read")
-    assert chosen["why"].startswith("checker:") and len(asked) == 1
+    assert chosen == {"status": "found", "tool": public_name("hub-2", "companies_read"), "site": "example.com",
+                      "action": "read", "what": "companies"}
+    assert len(asked) == 1
     assert {t["tool"] for t in asked[0]["tools"]} >= {READ, public_name("hub-2", "companies_read")}

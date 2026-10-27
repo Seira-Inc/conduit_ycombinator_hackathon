@@ -1,5 +1,5 @@
 import asyncio
-import json
+import re
 from datetime import datetime
 
 from mcp.shared.memory import create_connected_server_and_client_session
@@ -47,17 +47,22 @@ async def test_a_broken_program_withdraws_the_tool_and_a_repair_brings_it_back(a
     monkeypatch.setattr("conduit.app.repair_connector", fake_repair)
     monkeypatch.setattr("conduit.app.model_settings", lambda: {"available": True})
     async with create_connected_server_and_client_session(app.state.gateway) as session:
-        failed = json.loads((await session.call_tool(READ, {"id": "r1"})).content[0].text)
+        failed = (await session.call_tool(READ, {"id": "r1"})).content[0].text
         withdrawn = {t.name for t in (await session.list_tools()).tools}
+        again = (await session.call_tool(READ, {"id": "r1"})).content[0].text
+        job = next(j for j in app.state.jobs.values() if j.get("kind") == "repair")
         for _ in range(40):
-            report = (await session.call_tool("seira_status", {"job_id": failed["repair_job_id"]})).structuredContent
-            if report["status"] in ("complete", "error"):
+            report = (await session.call_tool("seira_status", {"job": job["id"]})).structuredContent
+            if report["status"] in ("ready", "failed"):
                 break
             await asyncio.sleep(0.05)
         back = {t.name for t in (await session.list_tools()).tools}
-    assert failed["code"] == "locator_missing" and failed["degraded"] and "repair_job_id" in failed
+    assert re.fullmatch(r"Reading records on example\.com isn't working right now\. Seira is fixing it; try again in "
+                        r"a few minutes\. Reference [A-Z2-7]{8}\.", failed)
+    assert "degraded" not in failed and job["id"] not in failed and "locator" not in failed
+    assert again.startswith("Reading records on example.com isn't working right now.")
     assert READ not in withdrawn and READ in back
-    assert report["status"] == "complete" and report["kind"] == "repair" and repairs == ["records"]
+    assert report["status"] == "ready" and repairs == ["records"]
     capability = app.state.store.get("demo-1").capabilities[0]
     assert capability["status"] == "ready" and "degraded" not in capability
 
@@ -66,19 +71,22 @@ async def test_user_errors_keep_the_tool_and_a_sign_out_says_how_to_sign_in(app,
     monkeypatch.setattr("conduit.runtime.Runtime.call", failing_with(
         ProgramError("object_missing", "No such record"), ProgramError("authentication_required", "Signed out")))
     async with create_connected_server_and_client_session(app.state.gateway) as session:
-        missing = json.loads((await session.call_tool(READ, {"id": "zzz"})).content[0].text)
-        signed_out = json.loads((await session.call_tool(READ, {"id": "r1"})).content[0].text)
+        missing = (await session.call_tool(READ, {"id": "zzz"})).content[0].text
+        refused = (await session.call_tool(READ, {"id": "r1"})).content[0].text
         listed = {t.name for t in (await session.list_tools()).tools}
-    assert missing["code"] == "object_missing" and "degraded" not in missing and READ in listed
-    assert "conduit login demo-1" in signed_out["next"] and not app.state.jobs
+    assert missing == "There's no record with that ID on example.com." and READ in listed
+    assert refused == "Example.com refused this. You may need to sign in again: http://127.0.0.1:4455/"
+    assert not app.state.jobs
 
 
 async def test_without_a_model_the_withdrawn_tool_names_the_manual_repair(app, monkeypatch):
     monkeypatch.setattr("conduit.runtime.Runtime.call", failing_with(ProgramError("program_failed", "broke")))
     monkeypatch.setattr("conduit.app.model_settings", lambda: {"available": False})
     async with create_connected_server_and_client_session(app.state.gateway) as session:
-        failed = json.loads((await session.call_tool(READ, {"id": "r1"})).content[0].text)
-    assert failed["degraded"] and "conduit repair demo-1 records" in failed["next"] and not app.state.jobs
+        failed = (await session.call_tool(READ, {"id": "r1"})).content[0].text
+    assert failed.startswith("Reading records on example.com isn't available right now. Your administrator can see "
+                             "why. Reference ")
+    assert "conduit" not in failed and not app.state.jobs
 
 
 async def test_daily_check_records_whether_each_site_is_still_signed_in(app, monkeypatch):

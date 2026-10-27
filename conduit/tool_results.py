@@ -16,7 +16,7 @@ def safe_message(exc: BaseException) -> str:
     # Transport exceptions can contain credential-bearing URLs. Expose only safe local errors.
     if isinstance(exc, (ValueError, RuntimeError)):
         return str(exc)[:1200]
-    return f"{type(exc).__name__}: action failed; inspect the interface and retry."
+    return f"{type(exc).__name__}: the action failed."
 
 
 def error_payload(exc: BaseException) -> dict:

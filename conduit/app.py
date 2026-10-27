@@ -15,7 +15,7 @@ from pydantic import Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .agent import model_settings
-from .audit import Audit
+from .audit import Audit, ErrorLog
 from .browser import BrowserSession
 from .compiler import compile_connector, repair_connector
 from .discovery import discover, refresh_forms
@@ -43,6 +43,7 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
     store = Store(home or Path(os.environ.get("CONDUIT_HOME", ".conduit")))
     registry = Registry(store)
     audit = Audit(store.home / "audit.jsonl")
+    errors = ErrorLog(store.home / "errors.jsonl")
     users = Users(store.home / "users.json")
     runtimes, jobs, tasks, job_tasks = {}, {}, set(), {}
     build_slots = asyncio.Semaphore(2)
@@ -50,6 +51,7 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
 
     @asynccontextmanager
     async def lifespan(app):
+        errors.prune()
         clock = os.environ.get("CONDUIT_DAILY_CHECK", "07:00")
         if clock != "off":
             task = asyncio.create_task(daily_loop(clock))
@@ -67,6 +69,7 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
     app.state.store = store
     app.state.registry = registry
     app.state.audit = audit
+    app.state.errors = errors
     app.state.users = users
     app.state.runtimes = runtimes
     app.state.jobs = jobs
@@ -190,6 +193,13 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
                 pass
 
     app.state.run_daily_check = run_daily_check
+
+    @app.get("/api/errors/{ref}")
+    async def error_detail(ref: str):
+        row = errors.find(ref.upper())
+        if row is None:
+            raise HTTPException(404, "No error with that reference")
+        return row
 
     @app.post("/api/check")
     async def check_now():
@@ -463,7 +473,8 @@ def create_app(home: Path | None = None, *, mcp_json_response: bool = False) -> 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     gateway = build_gateway(registry=registry, runtime_for=runtime_for, compile_jobs=compile_jobs, jobs=jobs,
                             start_build=start_site_build, start_compilation=start_compilation,
-                            cancel_job=request_cancel, persist=store.write, audit=audit, start_repair=start_repair,
+                            cancel_job=request_cancel, persist=store.write, audit=audit, errors=errors,
+                            start_repair=start_repair,
                             users=users, home=store.home,
                             model_available=lambda: bool(model_settings().get("available")))
     manager = mount_gateway(app, gateway, json_response=mcp_json_response, users=users)

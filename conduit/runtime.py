@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from pathlib import Path
 from urllib.parse import quote
@@ -11,6 +12,16 @@ from .browser import BrowserSession
 from .models import Manifest
 from .net import NetworkPolicy, auth_values, fetch
 from .session_lock import SessionLease
+
+
+class InvalidArguments(ValueError):
+    def __init__(self, field: str, constraint: str):
+        self.field, self.constraint = field, constraint
+        super().__init__(f"Invalid {field}: {constraint} constraint failed")
+
+
+class ToolUnavailable(ValueError):
+    """The tool exists but must not run: unverified, changed since verification, or read-only mode."""
 
 
 def scalar(value):
@@ -72,10 +83,13 @@ class Runtime:
         errors = list(Draft202012Validator(tool.input_schema).iter_errors(arguments))
         if errors:
             error = errors[0]
-            location = ".".join(map(str, error.path)) or "arguments"
-            raise ValueError(f"Invalid {location}: {error.validator} constraint failed")
+            location = ".".join(map(str, error.path))
+            if not location and error.validator == "required":
+                missing = re.match(r"'([^']+)' is a required property", error.message)
+                location = missing.group(1) if missing else ""
+            raise InvalidArguments(location or "arguments", str(error.validator))
         if self.read_only and not tool.read_only:
-            raise ValueError(
+            raise ToolUnavailable(
                 "This server was started in read-only mode. Restart without --read-only to enable actions."
             )
         if tool.adapter == "program":
@@ -84,9 +98,9 @@ class Runtime:
             from .verifier import FamilyExecutor
 
             if not verified_program(tool):
-                raise ValueError("This operation has not passed its required verification")
+                raise ToolUnavailable("This operation has not passed its required verification")
             if fingerprint(tool.config["family"]) != tool.config.get("fingerprint"):
-                raise ValueError("The compiled program changed; recompile and verify before running it")
+                raise ToolUnavailable("The compiled program changed; recompile and verify before running it")
             await self.acquire_browser()
             try:
                 return await FamilyExecutor(self.browser, self.manifest, tool.config["family"]).call(

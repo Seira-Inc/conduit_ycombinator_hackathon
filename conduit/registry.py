@@ -72,6 +72,7 @@ class Registry:
         self._mtimes: dict[str, int] = {}
         self._manifests: dict[str, Manifest] = {}
         self._entries: dict[str, Entry] = {}
+        self._withdrawn: dict[str, Entry] = {}
 
     def refresh(self) -> None:
         seen = set()
@@ -106,12 +107,14 @@ class Registry:
     def _drop(self, connector_id: str) -> None:
         self._mtimes.pop(connector_id, None)
         self._manifests.pop(connector_id, None)
-        for name in [n for n, e in self._entries.items() if e.connector_id == connector_id]:
-            del self._entries[name]
+        for table in (self._entries, self._withdrawn):
+            for name in [n for n, e in table.items() if e.connector_id == connector_id]:
+                del table[name]
 
     def _index(self, manifest: Manifest) -> None:
-        for name in [n for n, e in self._entries.items() if e.connector_id == manifest.id]:
-            del self._entries[name]
+        for table in (self._entries, self._withdrawn):
+            for name in [n for n, e in table.items() if e.connector_id == manifest.id]:
+                del table[name]
         if manifest.kind != "website":
             return
         try:
@@ -121,15 +124,17 @@ class Registry:
         labels = {c.get("resource"): c.get("label") for c in manifest.capabilities if c.get("resource")}
         statuses = {c.get("resource"): c.get("status") for c in manifest.capabilities if c.get("resource")}
         for tool in manifest.tools:
-            # A degraded resource stays out of the catalog until its repair republishes it.
-            if not verified_program(tool) or statuses.get(tool.resource) == "degraded":
+            if not verified_program(tool):
                 continue
             label = labels.get(tool.resource) or tool.resource
             resource_tokens = words(tool.resource) | words(label)
             tokens = (resource_tokens | words(tool.name) | words(tool.description)
                       | words(manifest.name) | {host_label(site)})
             name = public_name(manifest.id, tool.name)
-            self._entries[name] = Entry(
+            # A degraded resource stays out of the catalog until its repair republishes it; it is
+            # kept aside so a call by name can say it is being fixed.
+            table = self._withdrawn if statuses.get(tool.resource) == "degraded" else self._entries
+            table[name] = Entry(
                 name=name, connector_id=manifest.id, tool=tool.name, connector_name=manifest.name,
                 site=site, resource=tool.resource, verb=tool.operation, label=label,
                 read_only=tool.read_only, description=tool.description, status=statuses.get(tool.resource) or "ready",
@@ -142,6 +147,9 @@ class Registry:
 
     def lookup(self, name: str) -> Entry | None:
         return self._entries.get(name)
+
+    def withdrawn(self, name: str) -> Entry | None:
+        return self._withdrawn.get(name)
 
     def manifest(self, connector_id: str) -> Manifest | None:
         return self._manifests.get(connector_id)
