@@ -6,7 +6,7 @@ Seira's just-in-time tool engine. Point it at a website you are signed in to; it
 
 ## Read first
 
-- `journal.md`: what happened and what was decided, newest first. `problems_encountered.md`: open and resolved problems, newest first. Both append-only.
+- On the `imi` branch only, not `main`: `journal.md` (what happened and what was decided), `problems_encountered.md` (open and resolved problems), both append-only and newest first, and `come_back_to.md` (things that work for now but need a proper answer later).
 - `docs/SYSTEM_DESIGN.md`: the design. The just-in-time loop in ten steps, the three budget tiers, what exists today versus what to build, and the decisions already made.
 - `docs/research/`: the research phase this repo was seeded from. `journal.md` (standing decisions, newest first), `problems_encountered.md` (open items), `HANDOFF.md` (architecture and gotchas), `COMPILER_VALIDATION.md` (the measured numbers the design cites).
 
