@@ -1,5 +1,9 @@
 # conduit
 
+> **Hackathon snapshot, no longer developed.** This is the version of Seira built for the Y Combinator
+> agent hackathon in October 2026. It gets security fixes only; development continues privately.
+> To report a security problem, see [SECURITY.md](SECURITY.md).
+
 Seira's just-in-time tool engine. Point it at a website you are signed in to; it learns the site, builds tools that create, read, update and delete records there, proves them against the live site, and serves them over MCP with no model calls at run time.
 
 ![The just-in-time loop](docs/design/jit-loop.png)
